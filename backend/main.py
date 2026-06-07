@@ -1,5 +1,6 @@
 import os
 import json
+import logging
 from collections.abc import Generator
 from typing import Literal
 
@@ -15,6 +16,8 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "local-key")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "local-model")
 OPENAI_PROJECT = os.getenv("OPENAI_PROJECT")
 OPENAI_PROMPT_ID = os.getenv("OPENAI_PROMPT_ID")
+
+logger = logging.getLogger("uvicorn.error")
 
 ResponseFormat = Literal["free", "json", "md-list", "md-table"]
 
@@ -35,6 +38,7 @@ class ChatRequest(BaseModel):
     messages: list[ChatMessage] = Field(min_length=1)
     response_format: ResponseFormat = "free"
     max_output_tokens: int | None = Field(default=None, ge=1, le=32000)
+    temperature: float | None = Field(default=None, ge=0, le=2)
     stop: list[str] | None = Field(default=None, max_length=4)
 
     @field_validator("stop")
@@ -117,7 +121,14 @@ def build_request_body(payload: ChatRequest) -> dict[str, object]:
     if payload.max_output_tokens is not None:
         request_body["max_output_tokens"] = payload.max_output_tokens
 
+    if payload.temperature is not None:
+        request_body["temperature"] = payload.temperature
+
     return request_body
+
+
+def log_frontend_payload(payload: ChatRequest) -> None:
+    logger.info("Frontend chat payload: %s", json.dumps(payload.model_dump(), ensure_ascii=False))
 
 
 def sse_event(event: str, data: object) -> str:
@@ -187,6 +198,7 @@ def trim_stream_text(text: str, emitted_length: int, max_output_tokens: int | No
 
 @app.post("/api/chat", response_model=ChatResponse)
 def chat(payload: ChatRequest) -> ChatResponse:
+    log_frontend_payload(payload)
     request_body = build_request_body(payload)
 
     try:
@@ -207,6 +219,8 @@ def chat(payload: ChatRequest) -> ChatResponse:
 
 @app.post("/api/chat/stream")
 def chat_stream(payload: ChatRequest) -> StreamingResponse:
+    log_frontend_payload(payload)
+
     def stream_events() -> Generator[str, None, None]:
         request_body = build_request_body(payload)
         pending = ""

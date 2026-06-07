@@ -46,6 +46,7 @@ export default function App() {
   const [input, setInput] = useState('');
   const [responseFormat, setResponseFormat] = useState<ResponseFormat>('free');
   const [maxOutputTokens, setMaxOutputTokens] = useState('1024');
+  const [temperature, setTemperature] = useState('1');
   const [stopSequences, setStopSequences] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -77,6 +78,7 @@ export default function App() {
     abortControllerRef.current = controller;
 
     const parsedMaxOutputTokens = Number(maxOutputTokens);
+    const parsedTemperature = Number(temperature);
     const stop = stopSequences
       .split('\n')
       .map((sequence) => sequence.trim())
@@ -90,6 +92,8 @@ export default function App() {
           messages: visibleMessages,
           response_format: responseFormat,
           max_output_tokens: Number.isFinite(parsedMaxOutputTokens) && parsedMaxOutputTokens > 0 ? parsedMaxOutputTokens : undefined,
+          temperature:
+            Number.isFinite(parsedTemperature) && parsedTemperature >= 0 && parsedTemperature <= 2 ? parsedTemperature : undefined,
           stop: stop.length ? stop : undefined,
         }),
         signal: controller.signal,
@@ -184,6 +188,17 @@ export default function App() {
                 type="number"
                 value={maxOutputTokens}
                 onChange={(event) => setMaxOutputTokens(event.target.value)}
+              />
+            </label>
+            <label>
+              Temperature
+              <input
+                min="0"
+                max="2"
+                step="0.1"
+                type="number"
+                value={temperature}
+                onChange={(event) => setTemperature(event.target.value)}
               />
             </label>
             <label>
