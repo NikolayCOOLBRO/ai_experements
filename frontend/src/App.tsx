@@ -1,4 +1,4 @@
-import { FormEvent, useRef, useState } from 'react';
+import { FormEvent, useEffect, useRef, useState } from 'react';
 
 type ChatMessage = {
   role: 'system' | 'user' | 'assistant';
@@ -15,6 +15,16 @@ const initialMessages: ChatMessage[] = [
 type SseEvent = {
   event: string;
   data: string;
+};
+
+type AiModel = {
+  id: string;
+  label: string;
+};
+
+type ModelsResponse = {
+  models: AiModel[];
+  default_model: string;
 };
 
 type ResponseFormat = 'free' | 'json' | 'md-list' | 'md-table';
@@ -44,13 +54,35 @@ function removeEmptyMessages(messages: ChatMessage[]): ChatMessage[] {
 export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
   const [input, setInput] = useState('');
+  const [models, setModels] = useState<AiModel[]>([]);
+  const [selectedModel, setSelectedModel] = useState('');
   const [responseFormat, setResponseFormat] = useState<ResponseFormat>('free');
   const [maxOutputTokens, setMaxOutputTokens] = useState('1024');
   const [temperature, setTemperature] = useState('1');
-  const [stopSequences, setStopSequences] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [modelsError, setModelsError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    async function loadModels() {
+      try {
+        const response = await fetch('/api/models');
+        if (!response.ok) {
+          throw new Error('Не удалось загрузить список AI моделей');
+        }
+
+        const data = (await response.json()) as ModelsResponse;
+        setModels(data.models);
+        setSelectedModel(data.default_model || data.models[0]?.id || '');
+        setModelsError(null);
+      } catch (err) {
+        setModelsError(err instanceof Error ? err.message : 'Не удалось загрузить список AI моделей');
+      }
+    }
+
+    loadModels();
+  }, []);
 
   function handleStop() {
     abortControllerRef.current?.abort();
@@ -60,7 +92,7 @@ export default function App() {
     event.preventDefault();
 
     const text = input.trim();
-    if (!text || isLoading) {
+    if (!text || isLoading || !selectedModel) {
       return;
     }
 
@@ -79,10 +111,6 @@ export default function App() {
 
     const parsedMaxOutputTokens = Number(maxOutputTokens);
     const parsedTemperature = Number(temperature);
-    const stop = stopSequences
-      .split('\n')
-      .map((sequence) => sequence.trim())
-      .filter(Boolean);
 
     try {
       const response = await fetch('/api/chat/stream', {
@@ -90,11 +118,11 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           messages: visibleMessages,
+          model: selectedModel,
           response_format: responseFormat,
           max_output_tokens: Number.isFinite(parsedMaxOutputTokens) && parsedMaxOutputTokens > 0 ? parsedMaxOutputTokens : undefined,
           temperature:
             Number.isFinite(parsedTemperature) && parsedTemperature >= 0 && parsedTemperature <= 2 ? parsedTemperature : undefined,
-          stop: stop.length ? stop : undefined,
         }),
         signal: controller.signal,
       });
@@ -176,10 +204,21 @@ export default function App() {
           })}
         </div>
 
+        {modelsError && <div className="error">{modelsError}</div>}
         {error && <div className="error">{error}</div>}
 
         <form className="composer" onSubmit={handleSubmit}>
           <div className="settings">
+            <label>
+              AI модель
+              <select value={selectedModel} onChange={(event) => setSelectedModel(event.target.value)}>
+                {models.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.label}
+                  </option>
+                ))}
+              </select>
+            </label>
             <label>
               Max tokens
               <input
@@ -210,16 +249,6 @@ export default function App() {
                 <option value="md-table">Markdown таблица</option>
               </select>
             </label>
-            <label>
-              Stop sequence
-              <textarea
-                aria-label="Stop sequence"
-                placeholder="Одна sequence на строку"
-                rows={2}
-                value={stopSequences}
-                onChange={(event) => setStopSequences(event.target.value)}
-              />
-            </label>
           </div>
           <textarea
             aria-label="Сообщение"
@@ -239,7 +268,7 @@ export default function App() {
               Остановить
             </button>
           ) : (
-            <button disabled={!input.trim()} type="submit">
+            <button disabled={!input.trim() || !selectedModel} type="submit">
               Отправить
             </button>
           )}

@@ -5,8 +5,8 @@ services:
     environment:
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-http://host.docker.internal:1234/v1}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-local-key}
-      OPENAI_MODEL: ${OPENAI_MODEL:-local-model}
+      OPENAI_MODEL: ${OPENAI_MODEL:-yandexgpt-5-lite/latest}
       OPENAI_PROJECT: ${OPENAI_PROJECT:-}
-      OPENAI_PROMPT_ID: ${OPENAI_PROMPT_ID:-}
+      YANDEX_CLOUD_FOLDER: ${YANDEX_CLOUD_FOLDER:-}
     ports:
       - "8000:8000"

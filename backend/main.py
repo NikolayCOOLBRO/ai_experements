@@ -13,9 +13,9 @@ from pydantic import BaseModel, Field, field_validator
 
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://host.docker.internal:1234/v1").rstrip("/")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "local-key")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "local-model")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "yandexgpt-5-lite/latest")
 OPENAI_PROJECT = os.getenv("OPENAI_PROJECT")
-OPENAI_PROMPT_ID = os.getenv("OPENAI_PROMPT_ID")
+YANDEX_CLOUD_FOLDER = os.getenv("YANDEX_CLOUD_FOLDER", "")
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -28,6 +28,14 @@ RESPONSE_FORMAT_PROMPTS: dict[ResponseFormat, str] = {
     "md-table": "Ответь только формате Markdown-таблицы.",
 }
 
+AVAILABLE_MODELS = [
+    {"id": "yandexgpt-5-lite/latest", "label": "YandexGPT 5 Lite"},
+    {"id": "gpt-oss-20b/latest", "label": "GPT OSS 20B"},
+    {"id": "deepseek-v4-flash/latest", "label": "DeepSeek V4 Flash"},
+]
+AVAILABLE_MODEL_IDS = {model["id"] for model in AVAILABLE_MODELS}
+DEFAULT_MODEL = OPENAI_MODEL if OPENAI_MODEL in AVAILABLE_MODEL_IDS else AVAILABLE_MODELS[0]["id"]
+
 
 class ChatMessage(BaseModel):
     role: Literal["system", "user", "assistant"]
@@ -36,6 +44,7 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     messages: list[ChatMessage] = Field(min_length=1)
+    model: str | None = None
     response_format: ResponseFormat = "free"
     max_output_tokens: int | None = Field(default=None, ge=1, le=32000)
     temperature: float | None = Field(default=None, ge=0, le=2)
@@ -53,6 +62,16 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     message: ChatMessage
+
+
+class AiModel(BaseModel):
+    id: str
+    label: str
+
+
+class ModelsResponse(BaseModel):
+    models: list[AiModel]
+    default_model: str
 
 
 client_options = {
@@ -81,15 +100,16 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/api/models", response_model=ModelsResponse)
+def models() -> ModelsResponse:
+    return ModelsResponse(
+        models=[AiModel(**model) for model in AVAILABLE_MODELS],
+        default_model=DEFAULT_MODEL,
+    )
+
+
 def format_messages(messages: list[ChatMessage]) -> str:
     return "\n".join(f"{message.role}: {message.content}" for message in messages)
-
-
-def latest_user_input(messages: list[ChatMessage]) -> str:
-    for message in reversed(messages):
-        if message.role == "user":
-            return message.content
-    return messages[-1].content
 
 
 def apply_response_format_prompt(input_text: str, response_format: ResponseFormat) -> str:
@@ -100,23 +120,23 @@ def apply_response_format_prompt(input_text: str, response_format: ResponseForma
     return f"{prompt}\n\nЗапрос пользователя:\n{input_text}"
 
 
-def build_request_body(payload: ChatRequest) -> dict[str, object]:
-    request_body: dict[str, object]
-    input_text = apply_response_format_prompt(
-        latest_user_input(payload.messages) if OPENAI_PROMPT_ID else format_messages(payload.messages),
-        payload.response_format,
-    )
+def resolve_model(model: str | None) -> str:
+    selected_model = model or DEFAULT_MODEL
+    if selected_model not in AVAILABLE_MODEL_IDS:
+        raise HTTPException(status_code=400, detail="Unknown AI model")
 
-    if OPENAI_PROMPT_ID:
-        request_body = {
-            "prompt": {"id": OPENAI_PROMPT_ID},
-            "input": input_text,
-        }
-    else:
-        request_body = {
-            "model": OPENAI_MODEL,
-            "input": input_text,
-        }
+    if not YANDEX_CLOUD_FOLDER:
+        raise HTTPException(status_code=500, detail="YANDEX_CLOUD_FOLDER is not configured")
+
+    return f"gpt://{YANDEX_CLOUD_FOLDER}/{selected_model}"
+
+
+def build_request_body(payload: ChatRequest) -> dict[str, object]:
+    input_text = apply_response_format_prompt(format_messages(payload.messages), payload.response_format)
+    request_body: dict[str, object] = {
+        "model": resolve_model(payload.model),
+        "input": input_text,
+    }
 
     if payload.max_output_tokens is not None:
         request_body["max_output_tokens"] = payload.max_output_tokens
