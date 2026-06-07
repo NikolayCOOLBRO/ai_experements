@@ -103,7 +103,9 @@ Request:
 {
   "messages": [
     { "role": "user", "content": "Привет" }
-  ]
+  ],
+  "max_output_tokens": 1024,
+  "stop": ["\nuser:"]
 }
 ```
 
@@ -117,6 +119,20 @@ Response:
   }
 }
 ```
+
+`POST /api/chat/stream`
+
+Принимает такой же request, но возвращает Server-Sent Events:
+
+```text
+event: delta
+data: {"text":"Привет"}
+
+event: done
+data: {}
+```
+
+Frontend использует этот endpoint для постепенного вывода ответа и прерывания генерации.
 
 ## Структура
 

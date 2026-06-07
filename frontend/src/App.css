@@ -14,6 +14,8 @@ body {
 }
 
 button,
+input,
+select,
 textarea {
   font: inherit;
 }
@@ -132,9 +134,26 @@ h1 {
   padding-top: 8px;
 }
 
+.settings {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: minmax(140px, 180px) minmax(180px, 220px) 1fr;
+  gap: 12px;
+}
+
+.settings label {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: rgba(236, 243, 255, 0.72);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+input,
+select,
 textarea {
   width: 100%;
-  resize: vertical;
   padding: 14px 16px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 18px;
@@ -143,6 +162,22 @@ textarea {
   background: rgba(255, 255, 255, 0.08);
 }
 
+select {
+  appearance: none;
+  cursor: pointer;
+}
+
+select option {
+  color: #06111d;
+  background: #ffffff;
+}
+
+textarea {
+  resize: vertical;
+}
+
+input:focus,
+select:focus,
 textarea:focus {
   border-color: rgba(112, 228, 197, 0.74);
 }
@@ -179,6 +214,10 @@ button:disabled {
   }
 
   .composer {
+    grid-template-columns: 1fr;
+  }
+
+  .settings {
     grid-template-columns: 1fr;
   }
 
