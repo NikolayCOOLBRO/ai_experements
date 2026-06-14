@@ -1,3 +1,4 @@
+import math
 import os
 from collections.abc import Generator
 from typing import Literal
@@ -18,9 +19,24 @@ OPENAI_PROJECT = os.getenv("OPENAI_PROJECT")
 YANDEX_CLOUD_FOLDER = os.getenv("YANDEX_CLOUD_FOLDER", "")
 
 AVAILABLE_MODELS = [
-    {"id": "yandexgpt-5-lite/latest", "label": "YandexGPT 5 Lite"},
-    {"id": "gpt-oss-20b/latest", "label": "GPT OSS 20B"},
-    {"id": "deepseek-v4-flash/latest", "label": "DeepSeek V4 Flash"},
+    {
+        "id": "yandexgpt-5-lite/latest",
+        "label": "YandexGPT 5 Lite",
+        "max_tokens": 32768,
+        "token_hint": "1 токен ≈ 4 английских символа или 6 русских",
+    },
+    {
+        "id": "gpt-oss-20b/latest",
+        "label": "GPT OSS 20B",
+        "max_tokens": 131072,
+        "token_hint": "1 токен ≈ 4 английских символа или 6 русских",
+    },
+    {
+        "id": "deepseek-v4-flash/latest",
+        "label": "DeepSeek V4 Flash",
+        "max_tokens": 393216,
+        "token_hint": "1 токен ≈ 4 английских символа или 6 русских",
+    },
 ]
 AVAILABLE_MODEL_IDS = {model["id"] for model in AVAILABLE_MODELS}
 DEFAULT_MODEL = OPENAI_MODEL if OPENAI_MODEL in AVAILABLE_MODEL_IDS else AVAILABLE_MODELS[0]["id"]
@@ -79,6 +95,30 @@ def build_agent_input(agent: Agent, memory: list[ChatMessage]) -> str:
 {history}"""
 
 
+def estimate_tokens(text: str) -> int:
+    stripped = text.strip()
+    if not stripped:
+        return 0
+    return max(1, math.ceil(len(stripped) / 4))
+
+
+def usage_from_response(response: object) -> dict[str, object] | None:
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return None
+
+    input_tokens = getattr(usage, "input_tokens", None)
+    output_tokens = getattr(usage, "output_tokens", None)
+    if input_tokens is None and output_tokens is None:
+        return None
+
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "estimated": False,
+    }
+
+
 def build_request_body(agent: Agent, memory: list[ChatMessage]) -> dict[str, object]:
     parameters = agent.parameters
     request_body: dict[str, object] = {
@@ -103,7 +143,7 @@ def stream_agent_response(agent: Agent, memory: list[ChatMessage]) -> Generator[
                 if event.type == "response.output_text.delta":
                     yield "delta", {"text": event.delta}
                 elif event.type == "response.completed":
-                    yield "done", {}
+                    yield "done", {"usage": usage_from_response(event.response)}
                 elif event.type == "response.error":
                     yield "error", {"message": event.error.message}
     except APIStatusError as exc:

@@ -244,6 +244,13 @@ button:disabled {
   white-space: pre-wrap;
 }
 
+.token-usage {
+  display: block;
+  margin-top: 10px;
+  color: rgba(237, 244, 255, 0.64);
+  font-size: 12px;
+}
+
 .message.user {
   align-self: flex-end;
   background: linear-gradient(135deg, #246bff, #174ac4);

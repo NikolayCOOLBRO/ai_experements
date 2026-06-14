@@ -1,11 +1,26 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+
+MODEL_MAX_TOKENS = {
+    "yandexgpt-5-lite/latest": 32768,
+    "gpt-oss-20b/latest": 131072,
+    "deepseek-v4-flash/latest": 393216,
+}
+
+
+class TokenUsage(BaseModel):
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
+    total_chat_tokens: int | None = Field(default=None, ge=0)
+    estimated: bool = False
 
 
 class ChatMessage(BaseModel):
     role: Literal["user", "assistant"]
     content: str = Field(min_length=1)
+    tokens: TokenUsage | None = None
 
 
 class AgentParameters(BaseModel):
@@ -13,8 +28,19 @@ class AgentParameters(BaseModel):
     temperature: float | None = Field(default=1, ge=0, le=2)
     top_p: float | None = Field(default=None, ge=0, le=1)
     top_k: int | None = Field(default=None, ge=1)
-    max_output_tokens: int | None = Field(default=1024, ge=1, le=32000)
+    max_output_tokens: int | None = Field(default=1024, ge=1, le=393216)
     context_window: int | None = Field(default=20, ge=1, le=200)
+
+    @model_validator(mode="after")
+    def validate_model_token_limit(self) -> "AgentParameters":
+        if self.max_output_tokens is None:
+            return self
+
+        model_limit = MODEL_MAX_TOKENS.get(self.model)
+        if model_limit is None or self.max_output_tokens <= model_limit:
+            return self
+
+        raise ValueError(f"max_output_tokens exceeds limit for model {self.model}: {model_limit}")
 
 
 class AgentCreate(BaseModel):
@@ -87,6 +113,8 @@ class AgentRunRequest(BaseModel):
 class AiModel(BaseModel):
     id: str
     label: str
+    max_tokens: int
+    token_hint: str
 
 
 class ModelsResponse(BaseModel):

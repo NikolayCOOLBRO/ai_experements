@@ -3,11 +3,19 @@ import { FormEvent, useEffect, useRef, useState } from 'react';
 type ChatMessage = {
   role: 'user' | 'assistant';
   content: string;
+  tokens?: {
+    input_tokens?: number | null;
+    output_tokens?: number | null;
+    total_chat_tokens?: number | null;
+    estimated?: boolean;
+  } | null;
 };
 
 type AiModel = {
   id: string;
   label: string;
+  max_tokens: number;
+  token_hint: string;
 };
 
 type ModelsResponse = {
@@ -126,6 +134,36 @@ function buildAgentPayload(form: AgentForm) {
   };
 }
 
+function formatTokens(value?: number | null) {
+  return typeof value === 'number' ? value.toLocaleString('ru-RU') : null;
+}
+
+function tokenSummary(message: ChatMessage) {
+  if (!message.tokens) {
+    return null;
+  }
+
+  const parts: string[] = [];
+  const inputTokens = formatTokens(message.tokens.input_tokens);
+  const outputTokens = formatTokens(message.tokens.output_tokens);
+  const totalChatTokens = formatTokens(message.tokens.total_chat_tokens);
+
+  if (inputTokens) {
+    parts.push(`Вход: ${inputTokens}`);
+  }
+  if (outputTokens) {
+    parts.push(`Ответ: ${outputTokens}`);
+  }
+  if (totalChatTokens) {
+    parts.push(`Всего в чате: ${totalChatTokens}`);
+  }
+  if (message.tokens.estimated) {
+    parts.push('примерно');
+  }
+
+  return parts.length > 0 ? parts.join(' · ') : null;
+}
+
 export default function App() {
   const [models, setModels] = useState<AiModel[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -138,6 +176,7 @@ export default function App() {
   const [isEditing, setIsEditing] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const selectedModel = models.find((model) => model.id === form.model);
   const abortControllerRef = useRef<AbortController | null>(null);
 
   const selectedAgent = agents.find((agent) => agent.id === selectedAgentId) ?? null;
@@ -166,6 +205,22 @@ export default function App() {
 
     loadInitialData();
   }, []);
+
+  useEffect(() => {
+    if (!selectedModel) {
+      return;
+    }
+
+    const currentMaxOutputTokens = numericValue(form.maxOutputTokens);
+    if (currentMaxOutputTokens === null || currentMaxOutputTokens <= selectedModel.max_tokens) {
+      return;
+    }
+
+    setForm((current) => ({
+      ...current,
+      maxOutputTokens: String(selectedModel.max_tokens),
+    }));
+  }, [form.maxOutputTokens, selectedModel]);
 
   async function loadChats(agentId: string) {
     const response = await fetch(`/api/agents/${agentId}/chats`);
@@ -412,6 +467,14 @@ export default function App() {
             );
           }
 
+          if (eventItem.event === 'done' && data.usage) {
+            setMessages((current) =>
+              current.map((message, index) =>
+                index === assistantIndex ? { ...message, tokens: data.usage } : message,
+              ),
+            );
+          }
+
           if (eventItem.event === 'error') {
             throw new Error(data.message || 'Ошибка streaming ответа');
           }
@@ -509,7 +572,7 @@ export default function App() {
                 LLM
                 <select value={form.model} onChange={(event) => setForm({ ...form, model: event.target.value })} required>
                   {models.map((model) => (
-                    <option key={model.id} value={model.id}>{model.label}</option>
+                    <option key={model.id} value={model.id}>{model.label} · до {model.max_tokens.toLocaleString('ru-RU')} токенов</option>
                   ))}
                 </select>
               </label>
@@ -527,7 +590,10 @@ export default function App() {
               </label>
               <label>
                 Max tokens
-                <input min="1" max="32000" type="number" value={form.maxOutputTokens} onChange={(event) => setForm({ ...form, maxOutputTokens: event.target.value })} />
+                <input min="1" max={selectedModel?.max_tokens ?? 393216} type="number" value={form.maxOutputTokens} onChange={(event) => setForm({ ...form, maxOutputTokens: event.target.value })} />
+                {selectedModel && (
+                  <small>Максимум: {selectedModel.max_tokens.toLocaleString('ru-RU')} токенов. {selectedModel.token_hint}.</small>
+                )}
               </label>
               <label>
                 Окно памяти
@@ -587,10 +653,12 @@ export default function App() {
             ) : (
               messages.map((message, index) => {
                 const isPendingAssistant = isLoading && index === messages.length - 1 && message.role === 'assistant' && !message.content;
+                const usage = tokenSummary(message);
                 return (
                   <article className={`message ${message.role}${isPendingAssistant ? ' pending' : ''}`} key={`${message.role}-${index}`}>
                     <span>{message.role === 'user' ? 'Вы' : 'Агент'}</span>
                     <p>{isPendingAssistant ? 'Думаю...' : message.content}</p>
+                    {usage && <small className="token-usage">{usage}</small>}
                   </article>
                 );
               })

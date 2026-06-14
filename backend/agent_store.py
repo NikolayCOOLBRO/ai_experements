@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from schemas import Agent, AgentCreate, Chat, ChatCreate, ChatMessage
+from schemas import Agent, AgentCreate, Chat, ChatCreate, ChatMessage, TokenUsage
 
 
 class AgentStore:
@@ -52,7 +52,21 @@ class AgentStore:
             );
             """
         )
+        self._add_missing_message_columns()
         self._connection.commit()
+
+    def _add_missing_message_columns(self) -> None:
+        rows = self._connection.execute("PRAGMA table_info(chat_messages)").fetchall()
+        existing_columns = {row["name"] for row in rows}
+        columns = {
+            "input_tokens": "INTEGER",
+            "output_tokens": "INTEGER",
+            "total_chat_tokens": "INTEGER",
+            "tokens_estimated": "INTEGER NOT NULL DEFAULT 0",
+        }
+        for name, definition in columns.items():
+            if name not in existing_columns:
+                self._connection.execute(f"ALTER TABLE chat_messages ADD COLUMN {name} {definition}")
 
     def _now(self) -> str:
         return datetime.now(timezone.utc).isoformat()
@@ -202,10 +216,26 @@ class AgentStore:
         if not self._chat_exists(agent_id, chat_id):
             return None
         rows = self._connection.execute(
-            "SELECT role, content FROM chat_messages WHERE chat_id = ? ORDER BY ordinal ASC",
+            """
+            SELECT role, content, input_tokens, output_tokens, total_chat_tokens, tokens_estimated
+            FROM chat_messages
+            WHERE chat_id = ?
+            ORDER BY ordinal ASC
+            """,
             (chat_id,),
         ).fetchall()
-        return [ChatMessage(role=row["role"], content=row["content"]) for row in rows]
+        messages: list[ChatMessage] = []
+        for row in rows:
+            tokens = None
+            if row["input_tokens"] is not None or row["output_tokens"] is not None or row["total_chat_tokens"] is not None:
+                tokens = TokenUsage(
+                    input_tokens=row["input_tokens"],
+                    output_tokens=row["output_tokens"],
+                    total_chat_tokens=row["total_chat_tokens"],
+                    estimated=bool(row["tokens_estimated"]),
+                )
+            messages.append(ChatMessage(role=row["role"], content=row["content"], tokens=tokens))
+        return messages
 
     def append_message(self, agent_id: str, chat_id: str, message: ChatMessage) -> bool:
         if not self._chat_exists(agent_id, chat_id):
@@ -215,10 +245,65 @@ class AgentStore:
             (chat_id,),
         ).fetchone()
         now = self._now()
+        tokens = message.tokens
         self._connection.execute(
-            "INSERT INTO chat_messages (id, chat_id, role, content, created_at, ordinal) VALUES (?, ?, ?, ?, ?, ?)",
-            (str(uuid4()), chat_id, message.role, message.content, now, next_ordinal_row["next_ordinal"]),
+            """
+            INSERT INTO chat_messages (
+                id, chat_id, role, content, created_at, ordinal,
+                input_tokens, output_tokens, total_chat_tokens, tokens_estimated
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(uuid4()),
+                chat_id,
+                message.role,
+                message.content,
+                now,
+                next_ordinal_row["next_ordinal"],
+                tokens.input_tokens if tokens else None,
+                tokens.output_tokens if tokens else None,
+                tokens.total_chat_tokens if tokens else None,
+                int(tokens.estimated) if tokens else 0,
+            ),
         )
         self._connection.execute("UPDATE chats SET updated_at = ? WHERE id = ?", (now, chat_id))
         self._connection.commit()
         return True
+
+    def update_last_user_message_tokens(self, agent_id: str, chat_id: str, tokens: TokenUsage) -> bool:
+        if not self._chat_exists(agent_id, chat_id):
+            return False
+        row = self._connection.execute(
+            """
+            SELECT id FROM chat_messages
+            WHERE chat_id = ? AND role = 'user'
+            ORDER BY ordinal DESC
+            LIMIT 1
+            """,
+            (chat_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        self._connection.execute(
+            """
+            UPDATE chat_messages
+            SET input_tokens = ?, output_tokens = ?, total_chat_tokens = ?, tokens_estimated = ?
+            WHERE id = ?
+            """,
+            (tokens.input_tokens, tokens.output_tokens, tokens.total_chat_tokens, int(tokens.estimated), row["id"]),
+        )
+        self._connection.commit()
+        return True
+
+    def sum_chat_tokens(self, agent_id: str, chat_id: str) -> int | None:
+        if not self._chat_exists(agent_id, chat_id):
+            return None
+        row = self._connection.execute(
+            """
+            SELECT COALESCE(SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)), 0) AS total
+            FROM chat_messages
+            WHERE chat_id = ?
+            """,
+            (chat_id,),
+        ).fetchone()
+        return int(row["total"])

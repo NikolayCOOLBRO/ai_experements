@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from agent_store import AgentStore
-from llm import AVAILABLE_MODELS, DEFAULT_MODEL, sse_event, stream_agent_response
+from llm import AVAILABLE_MODELS, DEFAULT_MODEL, build_agent_input, estimate_tokens, sse_event, stream_agent_response
 from schemas import (
     Agent,
     AgentCreate,
@@ -18,6 +18,7 @@ from schemas import (
     ChatMessage,
     ChatsResponse,
     ModelsResponse,
+    TokenUsage,
 )
 
 
@@ -123,13 +124,36 @@ def run_agent_stream(agent_id: str, chat_id: str, payload: AgentRunRequest) -> S
     def stream_events() -> Generator[str, None, None]:
         assistant_content = ""
         current_memory = store.get_messages(agent_id, chat_id) or [user_message]
+        final_usage: TokenUsage | None = None
 
         for event, data in stream_agent_response(agent, current_memory):
             if event == "delta":
                 assistant_content += str(data.get("text", ""))
+            if event == "done":
+                usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+                input_tokens = usage.get("input_tokens")
+                output_tokens = usage.get("output_tokens")
+                estimated = bool(usage.get("estimated", False))
+
+                if not isinstance(input_tokens, int):
+                    input_tokens = estimate_tokens(build_agent_input(agent, current_memory))
+                    estimated = True
+                if not isinstance(output_tokens, int):
+                    output_tokens = estimate_tokens(assistant_content)
+                    estimated = True
+
+                final_usage = TokenUsage(input_tokens=input_tokens, output_tokens=output_tokens, estimated=estimated)
+                store.update_last_user_message_tokens(
+                    agent_id,
+                    chat_id,
+                    TokenUsage(input_tokens=input_tokens, estimated=estimated),
+                )
+                total_before_assistant = store.sum_chat_tokens(agent_id, chat_id) or 0
+                final_usage.total_chat_tokens = total_before_assistant + output_tokens
+                data = {"usage": final_usage.model_dump()}
             yield sse_event(event, data)
 
         if assistant_content.strip():
-            store.append_message(agent_id, chat_id, ChatMessage(role="assistant", content=assistant_content.strip()))
+            store.append_message(agent_id, chat_id, ChatMessage(role="assistant", content=assistant_content.strip(), tokens=final_usage))
 
     return StreamingResponse(stream_events(), media_type="text/event-stream")
