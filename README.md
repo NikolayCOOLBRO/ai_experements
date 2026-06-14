@@ -2,7 +2,7 @@
 
 Рабочая среда для создания и запуска LLM-агентов: React + TypeScript frontend, FastAPI backend и OpenAI-compatible LLM API через пакет `openai`.
 
-Агент состоит из контекста, планирования, параметров LLM и памяти. Агенты и их память пока хранятся в памяти backend-процесса без БД.
+Агент состоит из контекста, планирования и параметров LLM. История диалогов хранится в SQLite: у каждого агента может быть несколько отдельных чатов, а внутри каждого чата сохраняются все пользовательские сообщения и ответы модели.
 
 ## Запуск
 
@@ -28,6 +28,8 @@ npm run dev --prefix frontend
 ```
 
 Vite dev server проксирует `/api` на backend `http://localhost:8000`.
+
+Backend использует SQLite-файл. В Docker Compose история хранится в volume `backend_data`, поэтому агенты, чаты и сообщения переживают перезапуск контейнера.
 
 После запуска откройте:
 
@@ -58,10 +60,11 @@ http://localhost:8000/health
 1. Создать агента.
 2. Заполнить название, контекст, планирование и параметры LLM.
 3. Выбрать созданного агента.
-4. Описать задачу.
-5. Агент решает задачу с учетом своего контекста, плана и памяти.
+4. Создать новый чат или выбрать существующий.
+5. Отправить сообщение в рамках выбранного чата.
+6. Агент отвечает с учетом своего контекста, плана и истории текущего чата.
 
-Дефолтного агента нет. После перезапуска backend список агентов и память очищаются.
+Дефолтного агента нет. Чат не создается автоматически: перед первым запуском нужно явно создать его в UI.
 
 ## Агент
 
@@ -84,7 +87,7 @@ http://localhost:8000/health
 }
 ```
 
-`context_window` - это количество последних сообщений из памяти агента, которые backend добавляет в prompt при новом запуске. Это не токеновый размер контекста модели.
+`context_window` - это количество последних сообщений из текущего чата, которые backend добавляет в prompt при новом запуске. Это не токеновый размер контекста модели.
 
 `top_k` сейчас сохраняется в конфигурации агента, но не отправляется в OpenAI Responses API, потому что этот параметр не является стандартным для Responses API.
 
@@ -183,9 +186,39 @@ PUT    /api/agents/{agent_id}
 DELETE /api/agents/{agent_id}
 ```
 
-### Memory
+### Chats
 
-`GET /api/agents/{agent_id}/memory`
+`GET /api/agents/{agent_id}/chats`
+
+Response:
+
+```json
+{
+  "chats": [
+    {
+      "id": "uuid",
+      "agent_id": "uuid",
+      "title": "Новый чат",
+      "created_at": "2026-06-15T12:00:00+00:00",
+      "updated_at": "2026-06-15T12:01:30+00:00"
+    }
+  ]
+}
+```
+
+`POST /api/agents/{agent_id}/chats`
+
+Request:
+
+```json
+{
+  "title": "Новый чат"
+}
+```
+
+Response: созданный чат с `id`.
+
+`GET /api/agents/{agent_id}/chats/{chat_id}/messages`
 
 Response:
 
@@ -193,20 +226,22 @@ Response:
 {
   "messages": [
     { "role": "user", "content": "Разбери задачу" },
-    { "role": "assistant", "content": "..." }
+    { "role": "assistant", "content": "Сначала уточню цель и ограничения." }
   ]
 }
 ```
 
-Очистить память:
+Удалить чат:
 
 ```text
-DELETE /api/agents/{agent_id}/memory
+DELETE /api/agents/{agent_id}/chats/{chat_id}
 ```
+
+При удалении чата удаляются и все его сообщения.
 
 ### Run Agent
 
-`POST /api/agents/{agent_id}/run/stream`
+`POST /api/agents/{agent_id}/chats/{chat_id}/run/stream`
 
 Request:
 
@@ -235,6 +270,15 @@ data: {"message":"..."}
 
 Frontend использует streaming endpoint для постепенного вывода ответа и прерывания генерации.
 
+## История Чатов
+
+- История хранится в SQLite, а не в памяти процесса.
+- У каждого агента может быть несколько независимых чатов.
+- Все сообщения пользователя и ответы модели сохраняются целиком.
+- В prompt уходит не вся история, а только последние `N` сообщений выбранного чата, где `N = context_window`.
+- Если пользователь создает новый чат, предыдущие чаты остаются доступными в списке.
+- Если пользователь удаляет чат, он удаляется безвозвратно вместе со всей историей.
+
 ## Структура
 
 ```text
@@ -242,7 +286,7 @@ backend/
   main.py          FastAPI routes
   schemas.py       Pydantic schemas
   llm.py           OpenAI-compatible LLM client and prompt assembly
-  agent_store.py   In-memory agents and memory
+  agent_store.py   SQLite storage for agents, chats and messages
   requirements.txt Python dependencies
 
 frontend/
