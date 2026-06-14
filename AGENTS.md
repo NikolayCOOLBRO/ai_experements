@@ -1,7 +1,8 @@
 # AGENTS.md
 
 ## Project Shape
-- Backend is a FastAPI app in `backend/main.py`; Docker builds only `backend/requirements.txt` and `backend/main.py`.
+- Backend is a FastAPI agent workspace. Routes live in `backend/main.py`; schemas are in `backend/schemas.py`; OpenAI-compatible LLM calls are isolated in `backend/llm.py`; in-memory agent and memory storage is in `backend/agent_store.py`.
+- Backend Docker builds `backend/requirements.txt` and copies the whole `backend/` directory, because the app now uses multiple Python modules.
 - Frontend is a Vite React TypeScript app under `frontend/`; entrypoints are `frontend/src/main.tsx` and `frontend/src/App.tsx`.
 - The root `package-lock.json` is effectively empty; frontend npm commands must use `--prefix frontend` or run from `frontend/`.
 
@@ -9,20 +10,41 @@
 - Start backend: `docker compose up --build backend`.
 - Start frontend: `npm install --prefix frontend` then `npm run dev --prefix frontend`.
 - Frontend production/type check: `npm run build --prefix frontend` (`tsc && vite build`).
-- There are no configured test, lint, formatter, or Python typecheck commands in the repo; use the frontend build as the main automated verification for UI changes.
+- Backend syntax check: `python -m py_compile "backend\main.py" "backend\schemas.py" "backend\llm.py" "backend\agent_store.py"`.
+- There are no configured test, lint, formatter, or Python typecheck commands in the repo; use the frontend build and backend syntax check as automated verification.
 
 ## Runtime Wiring
 - Vite serves on port `3000` and proxies `/api` to `http://localhost:8000` via `frontend/vite.config.ts`.
-- Backend exposes `/health`, `/api/chat`, and `/api/chat/stream`; the frontend uses only the streaming endpoint for chat responses.
+- Backend exposes `/health`, `/api/models`, and agent endpoints under `/api/agents`.
+- Frontend no longer uses the old `/api/chat` contract; user work happens through agents.
 - Docker Compose maps backend port `8000:8000` and loads LLM settings from root `.env` with safe defaults.
 
+## Agent Behavior
+- Agents are stored in backend process memory only. There is no database or persistence; restarting backend clears all agents and their memory.
+- There is no default agent. The user must create an agent before running tasks.
+- An agent contains context, planning instructions, and LLM parameters: `model`, `temperature`, `top_p`, `top_k`, `max_output_tokens`, and `context_window`.
+- Agent memory is a list of user/assistant messages stored per agent in `agent_store.py`.
+- `context_window` limits how many latest memory messages are included in the prompt for the next LLM request. It is not the provider model's token context size.
+- `top_k` is stored in the agent config but is not sent to the OpenAI Responses API unless provider-specific support is added later.
+
+## API Contract
+- `GET /api/agents` returns `{ "agents": Agent[] }`.
+- `POST /api/agents` creates an agent.
+- `GET /api/agents/{agent_id}` returns one agent.
+- `PUT /api/agents/{agent_id}` updates an agent.
+- `DELETE /api/agents/{agent_id}` deletes an agent and its memory.
+- `GET /api/agents/{agent_id}/memory` returns `{ "messages": ChatMessage[] }`.
+- `DELETE /api/agents/{agent_id}/memory` clears memory.
+- `POST /api/agents/{agent_id}/run/stream` runs an agent with `{ "message": "..." }` and streams the answer.
+- Streaming responses are Server-Sent Events named `delta`, `done`, and `error`; preserve this event contract when changing either side.
+
 ## LLM Env Behavior
-- Root `.env.example` documents the expected variables: `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_PROJECT`, `OPENAI_PROMPT_ID`.
-- If `OPENAI_PROMPT_ID` is set, backend sends only the latest user message as `input` with `prompt={"id": ...}`.
-- If `OPENAI_PROMPT_ID` is unset, backend sends the whole message history as formatted text with `model=OPENAI_MODEL`.
+- Root `.env.example` documents the expected variables: `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_PROJECT`, `YANDEX_CLOUD_FOLDER`.
+- `OPENAI_MODEL` selects the default model id shown in the UI if it matches `backend/llm.py` `AVAILABLE_MODELS`.
+- `YANDEX_CLOUD_FOLDER` is required by the current `resolve_model()` implementation because model ids are converted to `gpt://{YANDEX_CLOUD_FOLDER}/{model}`.
 - Do not commit real `.env` values; `.env` is gitignored.
 
 ## Implementation Notes
-- Backend request/response schemas are Pydantic models in `backend/main.py`; `stop` sequences are normalized server-side and capped at 4 by the schema.
-- Streaming responses are Server-Sent Events named `delta`, `done`, and `error`; preserve this event contract when changing either side.
+- Keep API schemas in `backend/schemas.py`; avoid adding route-local Pydantic models in `main.py`.
+- Keep direct OpenAI SDK usage in `backend/llm.py`; routes should not call the OpenAI client directly.
 - Frontend text and UI labels are currently Russian; keep copy consistent unless the task asks otherwise.
