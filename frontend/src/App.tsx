@@ -32,6 +32,14 @@ type Agent = {
   parameters: AgentParameters;
 };
 
+type Chat = {
+  id: string;
+  agent_id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+};
+
 type AgentForm = {
   name: string;
   context: string;
@@ -122,6 +130,8 @@ export default function App() {
   const [models, setModels] = useState<AiModel[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [selectedAgentId, setSelectedAgentId] = useState('');
+  const [chats, setChats] = useState<Chat[]>([]);
+  const [selectedChatId, setSelectedChatId] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [form, setForm] = useState<AgentForm>(emptyForm);
   const [task, setTask] = useState('');
@@ -131,6 +141,7 @@ export default function App() {
   const abortControllerRef = useRef<AbortController | null>(null);
 
   const selectedAgent = agents.find((agent) => agent.id === selectedAgentId) ?? null;
+  const selectedChat = chats.find((chat) => chat.id === selectedChatId) ?? null;
 
   useEffect(() => {
     async function loadInitialData() {
@@ -156,14 +167,40 @@ export default function App() {
     loadInitialData();
   }, []);
 
-  async function loadMemory(agentId: string) {
-    const response = await fetch(`/api/agents/${agentId}/memory`);
+  async function loadChats(agentId: string) {
+    const response = await fetch(`/api/agents/${agentId}/chats`);
     if (!response.ok) {
-      throw new Error('Не удалось загрузить память агента');
+      throw new Error('Не удалось загрузить чаты');
+    }
+
+    const data = (await response.json()) as { chats: Chat[] };
+    setChats(data.chats);
+    return data.chats;
+  }
+
+  async function loadMessages(agentId: string, chatId: string) {
+    const response = await fetch(`/api/agents/${agentId}/chats/${chatId}/messages`);
+    if (!response.ok) {
+      throw new Error('Не удалось загрузить сообщения');
     }
 
     const data = (await response.json()) as { messages: ChatMessage[] };
     setMessages(data.messages);
+  }
+
+  async function handleSelectChat(chat: Chat) {
+    if (isLoading || !selectedAgentId) {
+      return;
+    }
+
+    setSelectedChatId(chat.id);
+    setError(null);
+
+    try {
+      await loadMessages(selectedAgentId, chat.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось загрузить сообщения');
+    }
   }
 
   async function handleSelectAgent(agent: Agent) {
@@ -172,14 +209,21 @@ export default function App() {
     }
 
     setSelectedAgentId(agent.id);
+    setSelectedChatId('');
+    setChats([]);
     setForm(formFromAgent(agent));
     setIsEditing(true);
     setError(null);
+    setMessages([]);
 
     try {
-      await loadMemory(agent.id);
+      const nextChats = await loadChats(agent.id);
+      if (nextChats.length > 0) {
+        setSelectedChatId(nextChats[0].id);
+        await loadMessages(agent.id, nextChats[0].id);
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Не удалось загрузить память агента');
+      setError(err instanceof Error ? err.message : 'Не удалось загрузить чаты агента');
     }
   }
 
@@ -189,6 +233,8 @@ export default function App() {
     }
 
     setSelectedAgentId('');
+    setSelectedChatId('');
+    setChats([]);
     setMessages([]);
     setIsEditing(false);
     setError(null);
@@ -221,9 +267,10 @@ export default function App() {
         return exists ? current.map((agent) => (agent.id === savedAgent.id ? savedAgent : agent)) : [...current, savedAgent];
       });
       setSelectedAgentId(savedAgent.id);
+      setSelectedChatId('');
+      setChats([]);
       setForm(formFromAgent(savedAgent));
       setIsEditing(true);
-      await loadMemory(savedAgent.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось сохранить агента');
     }
@@ -247,19 +294,61 @@ export default function App() {
     }
   }
 
-  async function handleClearMemory() {
-    if (!selectedAgentId || isLoading) {
+  async function handleDeleteChat() {
+    if (!selectedAgentId || !selectedChatId || isLoading) {
+      return;
+    }
+
+    if (!window.confirm('Удалить этот чат без возможности восстановления?')) {
       return;
     }
 
     try {
-      const response = await fetch(`/api/agents/${selectedAgentId}/memory`, { method: 'DELETE' });
+      const response = await fetch(`/api/agents/${selectedAgentId}/chats/${selectedChatId}`, { method: 'DELETE' });
       if (!response.ok) {
-        throw new Error('Не удалось очистить память');
+        throw new Error('Не удалось удалить чат');
       }
+
+      const nextChats = chats.filter((chat) => chat.id !== selectedChatId);
+      setChats(nextChats);
+
+      if (nextChats.length === 0) {
+        setSelectedChatId('');
+        setMessages([]);
+      } else {
+        setSelectedChatId(nextChats[0].id);
+        await loadMessages(selectedAgentId, nextChats[0].id);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось удалить чат');
+    }
+  }
+
+  async function handleCreateChat() {
+    if (!selectedAgentId || isLoading) {
+      return;
+    }
+
+    setError(null);
+
+    try {
+      const response = await fetch(`/api/agents/${selectedAgentId}/chats`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: 'Новый чат' }),
+      });
+
+      if (!response.ok) {
+        const details = await response.text();
+        throw new Error(details || 'Не удалось создать чат');
+      }
+
+      const chat = (await response.json()) as Chat;
+      setChats((current) => [chat, ...current]);
+      setSelectedChatId(chat.id);
       setMessages([]);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Не удалось очистить память');
+      setError(err instanceof Error ? err.message : 'Не удалось создать чат');
     }
   }
 
@@ -271,7 +360,7 @@ export default function App() {
     event.preventDefault();
 
     const text = task.trim();
-    if (!text || !selectedAgentId || isLoading) {
+    if (!text || !selectedAgentId || !selectedChatId || isLoading) {
       return;
     }
 
@@ -286,10 +375,10 @@ export default function App() {
     abortControllerRef.current = controller;
 
     try {
-      const response = await fetch(`/api/agents/${selectedAgentId}/run/stream`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text }),
+        const response = await fetch(`/api/agents/${selectedAgentId}/chats/${selectedChatId}/run/stream`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: text }),
         signal: controller.signal,
       });
 
@@ -340,11 +429,13 @@ export default function App() {
     } finally {
       abortControllerRef.current = null;
       setIsLoading(false);
-      if (selectedAgentId) {
+      if (selectedAgentId && selectedChatId) {
         try {
-          await loadMemory(selectedAgentId);
+          await loadMessages(selectedAgentId, selectedChatId);
+          const nextChats = await loadChats(selectedAgentId);
+          setChats(nextChats);
         } catch {
-          // UI already has the streamed response; memory refresh is best-effort.
+          // UI already has the streamed response; refresh is best-effort.
         }
       }
     }
@@ -454,18 +545,45 @@ export default function App() {
           <div className="panel-head">
             <div>
               <h2>{selectedAgent ? selectedAgent.name : 'Задача для агента'}</h2>
-              <p>{selectedAgent ? 'Опишите задачу, агент использует свой контекст, план и память.' : 'Сначала создайте или выберите агента.'}</p>
+              <p>{selectedAgent ? 'Выберите чат, затем опишите задачу. Агент использует свой контекст, план и историю чата.' : 'Сначала создайте или выберите агента.'}</p>
             </div>
-            {selectedAgent && <button type="button" onClick={handleClearMemory}>Очистить память</button>}
+            {selectedAgent && (
+              <div className="form-actions">
+                <button type="button" onClick={handleCreateChat}>Новый чат</button>
+                {selectedChat && <button className="danger" type="button" onClick={handleDeleteChat}>Удалить чат</button>}
+              </div>
+            )}
           </div>
 
           {error && <div className="error">{error}</div>}
 
+          {selectedAgent && (
+            <div className="agent-list">
+              {chats.length === 0 ? (
+                <div className="empty">У этого агента пока нет чатов. Создайте новый чат.</div>
+              ) : (
+                chats.map((chat) => (
+                  <button
+                    className={`agent-card ${chat.id === selectedChatId ? 'active' : ''}`}
+                    key={chat.id}
+                    type="button"
+                    onClick={() => handleSelectChat(chat)}
+                  >
+                    <strong>{chat.title}</strong>
+                    <span>{new Date(chat.updated_at).toLocaleString('ru-RU')}</span>
+                  </button>
+                ))
+              )}
+            </div>
+          )}
+
           <div className="messages" aria-live="polite">
             {!selectedAgent ? (
               <div className="empty">Создайте агента слева, затем выберите его для решения задачи.</div>
+            ) : !selectedChat ? (
+              <div className="empty">Выберите существующий чат или создайте новый.</div>
             ) : messages.length === 0 ? (
-              <div className="empty">Память агента пуста. Отправьте первую задачу.</div>
+              <div className="empty">Чат пуст. Отправьте первое сообщение.</div>
             ) : (
               messages.map((message, index) => {
                 const isPendingAssistant = isLoading && index === messages.length - 1 && message.role === 'assistant' && !message.content;
@@ -482,8 +600,8 @@ export default function App() {
           <form className="runner" onSubmit={handleRunAgent}>
             <textarea
               aria-label="Задача"
-              disabled={!selectedAgent}
-              placeholder="Опишите задачу для выбранного агента..."
+              disabled={!selectedAgent || !selectedChat}
+              placeholder="Опишите задачу для выбранного чата..."
               rows={3}
               value={task}
               onChange={(event) => setTask(event.target.value)}
@@ -497,7 +615,7 @@ export default function App() {
             {isLoading ? (
               <button type="button" onClick={handleStop}>Остановить</button>
             ) : (
-              <button disabled={!task.trim() || !selectedAgent} type="submit">Запустить</button>
+              <button disabled={!task.trim() || !selectedAgent || !selectedChat} type="submit">Запустить</button>
             )}
           </form>
         </section>

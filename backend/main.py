@@ -9,11 +9,14 @@ from llm import AVAILABLE_MODELS, DEFAULT_MODEL, sse_event, stream_agent_respons
 from schemas import (
     Agent,
     AgentCreate,
-    AgentMemoryResponse,
     AgentRunRequest,
     AgentsResponse,
     AiModel,
+    Chat,
+    ChatCreate,
+    ChatMessagesResponse,
     ChatMessage,
+    ChatsResponse,
     ModelsResponse,
 )
 
@@ -76,33 +79,50 @@ def delete_agent(agent_id: str) -> Response:
     return Response(status_code=204)
 
 
-@app.get("/api/agents/{agent_id}/memory", response_model=AgentMemoryResponse)
-def get_agent_memory(agent_id: str) -> AgentMemoryResponse:
-    memory = store.get_memory(agent_id)
-    if memory is None:
+@app.get("/api/agents/{agent_id}/chats", response_model=ChatsResponse)
+def list_chats(agent_id: str) -> ChatsResponse:
+    chats = store.list_chats(agent_id)
+    if chats is None:
         raise HTTPException(status_code=404, detail="Agent not found")
-    return AgentMemoryResponse(messages=memory)
+    return ChatsResponse(chats=chats)
 
 
-@app.delete("/api/agents/{agent_id}/memory", status_code=204)
-def clear_agent_memory(agent_id: str) -> Response:
-    if not store.clear_memory(agent_id):
+@app.post("/api/agents/{agent_id}/chats", response_model=Chat, status_code=201)
+def create_chat(agent_id: str, payload: ChatCreate) -> Chat:
+    chat = store.create_chat(agent_id, payload)
+    if chat is None:
         raise HTTPException(status_code=404, detail="Agent not found")
+    return chat
+
+
+@app.get("/api/agents/{agent_id}/chats/{chat_id}/messages", response_model=ChatMessagesResponse)
+def get_chat_messages(agent_id: str, chat_id: str) -> ChatMessagesResponse:
+    messages = store.get_messages(agent_id, chat_id)
+    if messages is None:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    return ChatMessagesResponse(messages=messages)
+
+
+@app.delete("/api/agents/{agent_id}/chats/{chat_id}", status_code=204)
+def delete_chat(agent_id: str, chat_id: str) -> Response:
+    if not store.delete_chat(agent_id, chat_id):
+        raise HTTPException(status_code=404, detail="Chat not found")
     return Response(status_code=204)
 
 
-@app.post("/api/agents/{agent_id}/run/stream")
-def run_agent_stream(agent_id: str, payload: AgentRunRequest) -> StreamingResponse:
+@app.post("/api/agents/{agent_id}/chats/{chat_id}/run/stream")
+def run_agent_stream(agent_id: str, chat_id: str, payload: AgentRunRequest) -> StreamingResponse:
     agent = store.get_agent(agent_id)
     if agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")
 
     user_message = ChatMessage(role="user", content=payload.message)
-    store.append_memory(agent_id, user_message)
+    if not store.append_message(agent_id, chat_id, user_message):
+        raise HTTPException(status_code=404, detail="Chat not found")
 
     def stream_events() -> Generator[str, None, None]:
         assistant_content = ""
-        current_memory = store.get_memory(agent_id) or [user_message]
+        current_memory = store.get_messages(agent_id, chat_id) or [user_message]
 
         for event, data in stream_agent_response(agent, current_memory):
             if event == "delta":
@@ -110,6 +130,6 @@ def run_agent_stream(agent_id: str, payload: AgentRunRequest) -> StreamingRespon
             yield sse_event(event, data)
 
         if assistant_content.strip():
-            store.append_memory(agent_id, ChatMessage(role="assistant", content=assistant_content.strip()))
+            store.append_message(agent_id, chat_id, ChatMessage(role="assistant", content=assistant_content.strip()))
 
     return StreamingResponse(stream_events(), media_type="text/event-stream")

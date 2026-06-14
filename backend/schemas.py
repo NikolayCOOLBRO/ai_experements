@@ -44,6 +44,34 @@ class AgentMemoryResponse(BaseModel):
     messages: list[ChatMessage]
 
 
+class ChatCreate(BaseModel):
+    title: str = Field(default="Новый чат", min_length=1, max_length=120)
+
+    @field_validator("title")
+    @classmethod
+    def strip_title(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("Title cannot be empty")
+        return stripped
+
+
+class Chat(BaseModel):
+    id: str
+    agent_id: str
+    title: str
+    created_at: str
+    updated_at: str
+
+
+class ChatsResponse(BaseModel):
+    chats: list[Chat]
+
+
+class ChatMessagesResponse(BaseModel):
+    messages: list[ChatMessage]
+
+
 class AgentRunRequest(BaseModel):
     message: str = Field(min_length=1, max_length=16000)
 

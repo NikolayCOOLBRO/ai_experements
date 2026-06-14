@@ -7,6 +7,12 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-local-key}
       OPENAI_MODEL: ${OPENAI_MODEL:-yandexgpt-5-lite/latest}
       OPENAI_PROJECT: ${OPENAI_PROJECT:-}
+      SQLITE_PATH: /app/data/app.sqlite3
       YANDEX_CLOUD_FOLDER: ${YANDEX_CLOUD_FOLDER:-}
     ports:
       - "8000:8000"
+    volumes:
+      - backend_data:/app/data
+
+volumes:
+  backend_data:
