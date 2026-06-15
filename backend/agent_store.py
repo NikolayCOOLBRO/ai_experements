@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from schemas import Agent, AgentCreate, Chat, ChatCreate, ChatMessage, TokenUsage
+from schemas import Agent, AgentCreate, Chat, ChatCreate, ChatMessage, StoredChatMessage, TokenUsage
 
 
 class AgentStore:
@@ -29,7 +29,9 @@ class AgentStore:
                 top_p REAL,
                 top_k INTEGER,
                 max_output_tokens INTEGER,
-                context_window INTEGER
+                context_window INTEGER,
+                context_mode TEXT NOT NULL DEFAULT 'full',
+                summary_window INTEGER NOT NULL DEFAULT 10
             );
 
             CREATE TABLE IF NOT EXISTS chats (
@@ -39,6 +41,15 @@ class AgentStore:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS chat_summaries (
+                chat_id TEXT PRIMARY KEY,
+                content TEXT NOT NULL,
+                covered_until_ordinal INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE
             );
 
             CREATE TABLE IF NOT EXISTS chat_messages (
@@ -52,8 +63,20 @@ class AgentStore:
             );
             """
         )
+        self._add_missing_agent_columns()
         self._add_missing_message_columns()
         self._connection.commit()
+
+    def _add_missing_agent_columns(self) -> None:
+        rows = self._connection.execute("PRAGMA table_info(agents)").fetchall()
+        existing_columns = {row["name"] for row in rows}
+        columns = {
+            "context_mode": "TEXT NOT NULL DEFAULT 'full'",
+            "summary_window": "INTEGER NOT NULL DEFAULT 10",
+        }
+        for name, definition in columns.items():
+            if name not in existing_columns:
+                self._connection.execute(f"ALTER TABLE agents ADD COLUMN {name} {definition}")
 
     def _add_missing_message_columns(self) -> None:
         rows = self._connection.execute("PRAGMA table_info(chat_messages)").fetchall()
@@ -84,6 +107,8 @@ class AgentStore:
                 "top_k": row["top_k"],
                 "max_output_tokens": row["max_output_tokens"],
                 "context_window": row["context_window"],
+                "context_mode": row["context_mode"],
+                "summary_window": row["summary_window"],
             },
         )
 
@@ -117,8 +142,9 @@ class AgentStore:
         self._connection.execute(
             """
             INSERT INTO agents (
-                id, name, context, planning, model, temperature, top_p, top_k, max_output_tokens, context_window
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                id, name, context, planning, model, temperature, top_p, top_k, max_output_tokens,
+                context_window, context_mode, summary_window
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 agent.id,
@@ -131,6 +157,8 @@ class AgentStore:
                 parameters.top_k,
                 parameters.max_output_tokens,
                 parameters.context_window,
+                parameters.context_mode,
+                parameters.summary_window,
             ),
         )
         self._connection.commit()
@@ -152,7 +180,7 @@ class AgentStore:
             """
             UPDATE agents
             SET name = ?, context = ?, planning = ?, model = ?, temperature = ?, top_p = ?, top_k = ?,
-                max_output_tokens = ?, context_window = ?
+                max_output_tokens = ?, context_window = ?, context_mode = ?, summary_window = ?
             WHERE id = ?
             """,
             (
@@ -165,6 +193,8 @@ class AgentStore:
                 parameters.top_k,
                 parameters.max_output_tokens,
                 parameters.context_window,
+                parameters.context_mode,
+                parameters.summary_window,
                 agent_id,
             ),
         )
@@ -236,6 +266,60 @@ class AgentStore:
                 )
             messages.append(ChatMessage(role=row["role"], content=row["content"], tokens=tokens))
         return messages
+
+    def get_stored_messages(self, agent_id: str, chat_id: str) -> list[StoredChatMessage] | None:
+        if not self._chat_exists(agent_id, chat_id):
+            return None
+        rows = self._connection.execute(
+            """
+            SELECT role, content, input_tokens, output_tokens, total_chat_tokens, tokens_estimated, ordinal
+            FROM chat_messages
+            WHERE chat_id = ?
+            ORDER BY ordinal ASC
+            """,
+            (chat_id,),
+        ).fetchall()
+        messages: list[StoredChatMessage] = []
+        for row in rows:
+            tokens = None
+            if row["input_tokens"] is not None or row["output_tokens"] is not None or row["total_chat_tokens"] is not None:
+                tokens = TokenUsage(
+                    input_tokens=row["input_tokens"],
+                    output_tokens=row["output_tokens"],
+                    total_chat_tokens=row["total_chat_tokens"],
+                    estimated=bool(row["tokens_estimated"]),
+                )
+            messages.append(StoredChatMessage(role=row["role"], content=row["content"], tokens=tokens, ordinal=row["ordinal"]))
+        return messages
+
+    def get_chat_summary(self, agent_id: str, chat_id: str) -> tuple[str, int] | None:
+        if not self._chat_exists(agent_id, chat_id):
+            return None
+        row = self._connection.execute(
+            "SELECT content, covered_until_ordinal FROM chat_summaries WHERE chat_id = ?",
+            (chat_id,),
+        ).fetchone()
+        if row is None:
+            return "", 0
+        return row["content"], int(row["covered_until_ordinal"])
+
+    def upsert_chat_summary(self, agent_id: str, chat_id: str, content: str, covered_until_ordinal: int) -> bool:
+        if not self._chat_exists(agent_id, chat_id):
+            return False
+        now = self._now()
+        self._connection.execute(
+            """
+            INSERT INTO chat_summaries (chat_id, content, covered_until_ordinal, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET
+                content = excluded.content,
+                covered_until_ordinal = excluded.covered_until_ordinal,
+                updated_at = excluded.updated_at
+            """,
+            (chat_id, content, covered_until_ordinal, now, now),
+        )
+        self._connection.commit()
+        return True
 
     def append_message(self, agent_id: str, chat_id: str, message: ChatMessage) -> bool:
         if not self._chat_exists(agent_id, chat_id):

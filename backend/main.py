@@ -5,7 +5,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from agent_store import AgentStore
-from llm import AVAILABLE_MODELS, DEFAULT_MODEL, build_agent_input, estimate_tokens, sse_event, stream_agent_response
+from llm import (
+    AVAILABLE_MODELS,
+    DEFAULT_MODEL,
+    build_agent_input,
+    estimate_tokens,
+    messages_to_summarize,
+    select_context,
+    sse_event,
+    stream_agent_response,
+    summarize_chat_history,
+)
 from schemas import (
     Agent,
     AgentCreate,
@@ -123,10 +133,28 @@ def run_agent_stream(agent_id: str, chat_id: str, payload: AgentRunRequest) -> S
 
     def stream_events() -> Generator[str, None, None]:
         assistant_content = ""
-        current_memory = store.get_messages(agent_id, chat_id) or [user_message]
+        current_memory = store.get_stored_messages(agent_id, chat_id) or []
+        summary = ""
+        summary_state = store.get_chat_summary(agent_id, chat_id)
+        if summary_state is not None:
+            summary, covered_until_ordinal = summary_state
+        else:
+            covered_until_ordinal = 0
+
+        if agent.parameters.context_mode == "compressed":
+            summary_batch = messages_to_summarize(agent, current_memory, covered_until_ordinal)
+            if summary_batch:
+                try:
+                    summary = summarize_chat_history(agent, summary, summary_batch)
+                    store.upsert_chat_summary(agent_id, chat_id, summary, summary_batch[-1].ordinal)
+                except Exception as exc:
+                    yield sse_event("error", {"message": f"Failed to summarize chat history: {exc}"})
+                    return
+
+        prompt_memory, prompt_summary = select_context(agent, current_memory or [user_message], summary)
         final_usage: TokenUsage | None = None
 
-        for event, data in stream_agent_response(agent, current_memory):
+        for event, data in stream_agent_response(agent, prompt_memory, prompt_summary):
             if event == "delta":
                 assistant_content += str(data.get("text", ""))
             if event == "done":
@@ -136,7 +164,7 @@ def run_agent_stream(agent_id: str, chat_id: str, payload: AgentRunRequest) -> S
                 estimated = bool(usage.get("estimated", False))
 
                 if not isinstance(input_tokens, int):
-                    input_tokens = estimate_tokens(build_agent_input(agent, current_memory))
+                    input_tokens = estimate_tokens(build_agent_input(agent, prompt_memory, prompt_summary))
                     estimated = True
                 if not isinstance(output_tokens, int):
                     output_tokens = estimate_tokens(assistant_content)

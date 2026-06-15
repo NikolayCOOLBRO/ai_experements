@@ -20,11 +20,14 @@
 - Docker Compose maps backend port `8000:8000` and loads LLM settings from root `.env` with safe defaults.
 
 ## Agent Behavior
-- Agents are stored in backend process memory only. There is no database or persistence; restarting backend clears all agents and their memory.
+- Agents, chats, chat messages, token usage, and chat summaries are stored in SQLite via `backend/agent_store.py`.
 - There is no default agent. The user must create an agent before running tasks.
-- An agent contains context, planning instructions, and LLM parameters: `model`, `temperature`, `top_p`, `top_k`, `max_output_tokens`, and `context_window`.
-- Agent memory is a list of user/assistant messages stored per agent in `agent_store.py`.
-- `context_window` limits how many latest memory messages are included in the prompt for the next LLM request. It is not the provider model's token context size.
+- An agent contains context, planning instructions, and LLM parameters: `model`, `temperature`, `top_p`, `top_k`, `max_output_tokens`, `context_window`, `context_mode`, and `summary_window`.
+- Each agent can have multiple chats. Chat history stores user/assistant messages plus token usage metadata.
+- `context_mode="full"` sends the full chat history to the LLM as-is.
+- `context_mode="compressed"` sends a separately stored chat summary plus the latest `context_window` messages as-is.
+- `summary_window` limits how many old messages are compressed in one separate summary LLM call before the main streamed response.
+- `context_window` is not the provider model token context size.
 - `top_k` is stored in the agent config but is not sent to the OpenAI Responses API unless provider-specific support is added later.
 
 ## API Contract
@@ -33,9 +36,11 @@
 - `GET /api/agents/{agent_id}` returns one agent.
 - `PUT /api/agents/{agent_id}` updates an agent.
 - `DELETE /api/agents/{agent_id}` deletes an agent and its memory.
-- `GET /api/agents/{agent_id}/memory` returns `{ "messages": ChatMessage[] }`.
-- `DELETE /api/agents/{agent_id}/memory` clears memory.
-- `POST /api/agents/{agent_id}/run/stream` runs an agent with `{ "message": "..." }` and streams the answer.
+- `GET /api/agents/{agent_id}/chats` returns `{ "chats": Chat[] }`.
+- `POST /api/agents/{agent_id}/chats` creates a chat.
+- `GET /api/agents/{agent_id}/chats/{chat_id}/messages` returns `{ "messages": ChatMessage[] }`.
+- `DELETE /api/agents/{agent_id}/chats/{chat_id}` deletes a chat and all its messages.
+- `POST /api/agents/{agent_id}/chats/{chat_id}/run/stream` runs an agent with `{ "message": "..." }` and streams the answer.
 - Streaming responses are Server-Sent Events named `delta`, `done`, and `error`; preserve this event contract when changing either side.
 
 ## LLM Env Behavior

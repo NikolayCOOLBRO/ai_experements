@@ -23,6 +23,10 @@ class ChatMessage(BaseModel):
     tokens: TokenUsage | None = None
 
 
+class StoredChatMessage(ChatMessage):
+    ordinal: int = Field(ge=1)
+
+
 class AgentParameters(BaseModel):
     model: str
     temperature: float | None = Field(default=1, ge=0, le=2)
@@ -30,6 +34,8 @@ class AgentParameters(BaseModel):
     top_k: int | None = Field(default=None, ge=1)
     max_output_tokens: int | None = Field(default=1024, ge=1, le=393216)
     context_window: int | None = Field(default=20, ge=1, le=200)
+    context_mode: Literal["full", "compressed"] = "full"
+    summary_window: int = Field(default=10, ge=1, le=100)
 
     @model_validator(mode="after")
     def validate_model_token_limit(self) -> "AgentParameters":

@@ -30,6 +30,8 @@ type AgentParameters = {
   top_k?: number | null;
   max_output_tokens?: number | null;
   context_window?: number | null;
+  context_mode: 'full' | 'compressed';
+  summary_window: number;
 };
 
 type Agent = {
@@ -58,6 +60,8 @@ type AgentForm = {
   topK: string;
   maxOutputTokens: string;
   contextWindow: string;
+  contextMode: 'full' | 'compressed';
+  summaryWindow: string;
 };
 
 type SseEvent = {
@@ -75,6 +79,8 @@ const emptyForm: AgentForm = {
   topK: '',
   maxOutputTokens: '1024',
   contextWindow: '20',
+  contextMode: 'full',
+  summaryWindow: '10',
 };
 
 function parseSseEvents(buffer: string): { events: SseEvent[]; rest: string } {
@@ -115,6 +121,8 @@ function formFromAgent(agent: Agent): AgentForm {
     topK: String(agent.parameters.top_k ?? ''),
     maxOutputTokens: String(agent.parameters.max_output_tokens ?? ''),
     contextWindow: String(agent.parameters.context_window ?? ''),
+    contextMode: agent.parameters.context_mode ?? 'full',
+    summaryWindow: String(agent.parameters.summary_window ?? 10),
   };
 }
 
@@ -130,6 +138,8 @@ function buildAgentPayload(form: AgentForm) {
       top_k: numericValue(form.topK),
       max_output_tokens: numericValue(form.maxOutputTokens),
       context_window: numericValue(form.contextWindow),
+      context_mode: form.contextMode,
+      summary_window: numericValue(form.summaryWindow) ?? 10,
     },
   };
 }
@@ -598,6 +608,19 @@ export default function App() {
               <label>
                 Окно памяти
                 <input min="1" max="200" type="number" value={form.contextWindow} onChange={(event) => setForm({ ...form, contextWindow: event.target.value })} />
+                <small>{form.contextMode === 'compressed' ? 'Последние N сообщений идут в prompt полностью.' : 'В режиме без сжатия история не обрезается.'}</small>
+              </label>
+              <label>
+                Режим контекста
+                <select value={form.contextMode} onChange={(event) => setForm({ ...form, contextMode: event.target.value as AgentForm['contextMode'] })}>
+                  <option value="full">Без сжатия</option>
+                  <option value="compressed">Со сжатием</option>
+                </select>
+              </label>
+              <label>
+                Пачка summary
+                <input min="1" max="100" type="number" value={form.summaryWindow} onChange={(event) => setForm({ ...form, summaryWindow: event.target.value })} />
+                <small>Сколько старых сообщений сжимать за один LLM-вызов.</small>
               </label>
             </div>
             <div className="form-actions">

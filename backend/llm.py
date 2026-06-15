@@ -6,7 +6,7 @@ from typing import Literal
 from fastapi import HTTPException
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 
-from schemas import Agent, ChatMessage
+from schemas import Agent, ChatMessage, StoredChatMessage
 
 
 StreamChunk = tuple[Literal["delta", "done", "error"], dict[str, object]]
@@ -68,15 +68,18 @@ def sse_event(event: str, data: object) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-def limited_memory(agent: Agent, memory: list[ChatMessage]) -> list[ChatMessage]:
-    context_window = agent.parameters.context_window
-    if context_window is None:
-        return memory
-    return memory[-context_window:]
+def format_history(memory: list[ChatMessage]) -> str:
+    return "\n".join(f"{message.role}: {message.content}" for message in memory)
 
 
-def build_agent_input(agent: Agent, memory: list[ChatMessage]) -> str:
-    history = "\n".join(f"{message.role}: {message.content}" for message in limited_memory(agent, memory))
+def build_agent_input(agent: Agent, memory: list[ChatMessage], summary: str = "") -> str:
+    summary_block = ""
+    if summary.strip():
+        summary_block = f"""
+Сжатая память чата:
+{summary.strip()}
+"""
+    history = format_history(memory)
     return f"""Ты агент: {agent.name}
 
 Контекст агента:
@@ -90,6 +93,8 @@ def build_agent_input(agent: Agent, memory: list[ChatMessage]) -> str:
 - Используй планирование как внутренний порядок работы.
 - Не показывай внутренние шаги, если пользователь явно не просит.
 - Отвечай на русском языке, если пользователь не попросил другой язык.
+
+{summary_block}
 
 Диалог:
 {history}"""
@@ -119,11 +124,11 @@ def usage_from_response(response: object) -> dict[str, object] | None:
     }
 
 
-def build_request_body(agent: Agent, memory: list[ChatMessage]) -> dict[str, object]:
+def build_request_body(agent: Agent, memory: list[ChatMessage], summary: str = "") -> dict[str, object]:
     parameters = agent.parameters
     request_body: dict[str, object] = {
         "model": resolve_model(parameters.model),
-        "input": build_agent_input(agent, memory),
+        "input": build_agent_input(agent, memory, summary),
     }
 
     if parameters.max_output_tokens is not None:
@@ -136,9 +141,9 @@ def build_request_body(agent: Agent, memory: list[ChatMessage]) -> dict[str, obj
     return request_body
 
 
-def stream_agent_response(agent: Agent, memory: list[ChatMessage]) -> Generator[StreamChunk, None, None]:
+def stream_agent_response(agent: Agent, memory: list[ChatMessage], summary: str = "") -> Generator[StreamChunk, None, None]:
     try:
-        with client.responses.create(**build_request_body(agent, memory), stream=True) as stream:
+        with client.responses.create(**build_request_body(agent, memory, summary), stream=True) as stream:
             for event in stream:
                 if event.type == "response.output_text.delta":
                     yield "delta", {"text": event.delta}
@@ -152,3 +157,73 @@ def stream_agent_response(agent: Agent, memory: list[ChatMessage]) -> Generator[
         yield "error", {"message": f"LLM request failed: {exc}"}
     except Exception as exc:
         yield "error", {"message": f"Unexpected LLM error: {exc}"}
+
+
+def select_context(agent: Agent, memory: list[ChatMessage], summary: str = "") -> tuple[list[ChatMessage], str]:
+    if agent.parameters.context_mode == "full":
+        return memory, ""
+
+    context_window = agent.parameters.context_window
+    if context_window is None:
+        return memory, summary
+    return memory[-context_window:], summary
+
+
+def messages_to_summarize(
+    agent: Agent,
+    memory: list[StoredChatMessage],
+    covered_until_ordinal: int,
+) -> list[StoredChatMessage]:
+    if agent.parameters.context_mode != "compressed":
+        return []
+
+    context_window = agent.parameters.context_window or 0
+    tail_start = len(memory) - context_window
+    if tail_start <= 0:
+        return []
+
+    candidates = [message for message in memory[:tail_start] if message.ordinal > covered_until_ordinal]
+    return candidates[: agent.parameters.summary_window]
+
+
+def build_summary_input(agent: Agent, previous_summary: str, memory: list[StoredChatMessage]) -> str:
+    previous_summary_block = previous_summary.strip() or "Пока нет сжатой памяти."
+    history = "\n".join(f"#{message.ordinal} {message.role}: {message.content}" for message in memory)
+    return f"""Обнови сжатую память чата для веб-агента.
+
+Агент: {agent.name}
+
+Контекст агента:
+{agent.context}
+
+Текущее summary:
+{previous_summary_block}
+
+Новые сообщения для сжатия:
+{history}
+
+Требования:
+- Верни только обновленное summary без преамбулы.
+- Сохрани выполненные действия, принятые решения, важные ограничения и договоренности.
+- Сохрани открытые вопросы и факты, которые понадобятся агенту позже.
+- Не пересказывай диалог дословно, сжимай до устойчивой памяти.
+- Пиши на русском языке."""
+
+
+def summarize_chat_history(agent: Agent, previous_summary: str, memory: list[StoredChatMessage]) -> str:
+    if not memory:
+        return previous_summary
+
+    parameters = agent.parameters
+    request_body: dict[str, object] = {
+        "model": resolve_model(parameters.model),
+        "input": build_summary_input(agent, previous_summary, memory),
+    }
+    if parameters.temperature is not None:
+        request_body["temperature"] = min(parameters.temperature, 0.3)
+    if parameters.top_p is not None:
+        request_body["top_p"] = parameters.top_p
+
+    response = client.responses.create(**request_body)
+    summary = getattr(response, "output_text", "")
+    return str(summary).strip() or previous_summary
