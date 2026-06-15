@@ -39,7 +39,7 @@ class SummaryTrace(BaseModel):
 
 
 FactCategory = Literal["goal", "constraints", "preferences", "decisions", "agreements", "entities"]
-ContextMode = Literal["full", "compressed", "sliding_window", "sticky_facts"]
+ContextMode = Literal["full", "compressed", "sliding_window", "sticky_facts", "branching"]
 
 
 class ChatFact(BaseModel):
@@ -129,10 +129,52 @@ class Chat(BaseModel):
     title: str
     created_at: str
     updated_at: str
+    parent_checkpoint_id: str | None = None
+    branch_title: str | None = None
+    branched_from_chat_id: str | None = None
+    branched_from_ordinal: int | None = Field(default=None, ge=1)
 
 
 class ChatsResponse(BaseModel):
     chats: list[Chat]
+
+
+class CheckpointCreate(BaseModel):
+    title: str = Field(default="Ветка", min_length=1, max_length=120)
+    source_message_ordinal: int | None = Field(default=None, ge=1)
+
+    @field_validator("title")
+    @classmethod
+    def strip_checkpoint_title(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("Title cannot be empty")
+        return stripped
+
+
+class BranchCreate(BaseModel):
+    title: str = Field(default="Новая ветка", min_length=1, max_length=120)
+
+    @field_validator("title")
+    @classmethod
+    def strip_branch_title(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("Title cannot be empty")
+        return stripped
+
+
+class Checkpoint(BaseModel):
+    id: str
+    agent_id: str
+    source_chat_id: str
+    source_message_ordinal: int = Field(ge=1)
+    title: str
+    created_at: str
+
+
+class CheckpointsResponse(BaseModel):
+    checkpoints: list[Checkpoint]
 
 
 class ChatMessagesResponse(BaseModel):

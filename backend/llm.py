@@ -174,7 +174,7 @@ def stream_agent_response(agent: Agent, memory: list[ChatMessage], summary: str 
 
 
 def select_context(agent: Agent, memory: list[ChatMessage], summary: str = "") -> tuple[list[ChatMessage], str]:
-    if agent.parameters.context_mode == "full":
+    if agent.parameters.context_mode in {"full", "branching"}:
         return memory, ""
 
     context_window = agent.parameters.context_window

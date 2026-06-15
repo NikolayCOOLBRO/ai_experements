@@ -34,7 +34,7 @@ type AgentRunTrace = {
   created_at: string;
   user_message_ordinal: number;
   assistant_message_ordinal?: number | null;
-  context_mode: 'full' | 'compressed' | 'sliding_window' | 'sticky_facts';
+  context_mode: 'full' | 'compressed' | 'sliding_window' | 'sticky_facts' | 'branching';
   context_window?: number | null;
   prompt_summary: string;
   prompt_facts: ChatFact[];
@@ -61,7 +61,7 @@ type AgentParameters = {
   top_k?: number | null;
   max_output_tokens?: number | null;
   context_window?: number | null;
-  context_mode: 'full' | 'compressed' | 'sliding_window' | 'sticky_facts';
+  context_mode: 'full' | 'compressed' | 'sliding_window' | 'sticky_facts' | 'branching';
   summary_window: number;
 };
 
@@ -79,6 +79,19 @@ type Chat = {
   title: string;
   created_at: string;
   updated_at: string;
+  parent_checkpoint_id?: string | null;
+  branch_title?: string | null;
+  branched_from_chat_id?: string | null;
+  branched_from_ordinal?: number | null;
+};
+
+type Checkpoint = {
+  id: string;
+  agent_id: string;
+  source_chat_id: string;
+  source_message_ordinal: number;
+  title: string;
+  created_at: string;
 };
 
 type AgentForm = {
@@ -91,7 +104,7 @@ type AgentForm = {
   topK: string;
   maxOutputTokens: string;
   contextWindow: string;
-  contextMode: 'full' | 'compressed' | 'sliding_window' | 'sticky_facts';
+  contextMode: 'full' | 'compressed' | 'sliding_window' | 'sticky_facts' | 'branching';
   summaryWindow: string;
 };
 
@@ -209,6 +222,9 @@ function contextModeLabel(mode: AgentParameters['context_mode']) {
   if (mode === 'sticky_facts') {
     return 'Sticky facts';
   }
+  if (mode === 'branching') {
+    return 'Ветки диалога';
+  }
   if (mode === 'compressed') {
     return 'Со сжатием';
   }
@@ -221,6 +237,9 @@ function contextModeLabel(mode: AgentParameters['context_mode']) {
 function contextWindowHint(mode: AgentParameters['context_mode']) {
   if (mode === 'sticky_facts') {
     return 'Последние N сообщений идут в prompt, важные факты хранятся отдельно как key-value память.';
+  }
+  if (mode === 'branching') {
+    return 'История чата сохраняется полностью, а новые ветки создаются через checkpoint как независимые продолжения.';
   }
   if (mode === 'compressed') {
     return 'Последние N сообщений идут в prompt полностью, старые сжимаются.';
@@ -239,11 +258,13 @@ export default function App() {
   const [selectedChatId, setSelectedChatId] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [traces, setTraces] = useState<AgentRunTrace[]>([]);
+  const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([]);
   const [form, setForm] = useState<AgentForm>(emptyForm);
   const [task, setTask] = useState('');
   const [isEditing, setIsEditing] = useState(false);
   const [isAgentsPanelVisible, setIsAgentsPanelVisible] = useState(true);
   const [isTraceVisible, setIsTraceVisible] = useState(true);
+  const [isBranchesVisible, setIsBranchesVisible] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const selectedModel = models.find((model) => model.id === form.model);
@@ -251,6 +272,7 @@ export default function App() {
 
   const selectedAgent = agents.find((agent) => agent.id === selectedAgentId) ?? null;
   const selectedChat = chats.find((chat) => chat.id === selectedChatId) ?? null;
+  const isBranchingMode = selectedAgent?.parameters.context_mode === 'branching';
 
   useEffect(() => {
     async function loadInitialData() {
@@ -303,6 +325,17 @@ export default function App() {
     return data.chats;
   }
 
+  async function loadCheckpoints(agentId: string) {
+    const response = await fetch(`/api/agents/${agentId}/checkpoints`);
+    if (!response.ok) {
+      throw new Error('Не удалось загрузить контрольные точки');
+    }
+
+    const data = (await response.json()) as { checkpoints: Checkpoint[] };
+    setCheckpoints(data.checkpoints);
+    return data.checkpoints;
+  }
+
   async function loadMessages(agentId: string, chatId: string) {
     const response = await fetch(`/api/agents/${agentId}/chats/${chatId}/messages`);
     if (!response.ok) {
@@ -351,9 +384,11 @@ export default function App() {
     setError(null);
     setMessages([]);
     setTraces([]);
+    setCheckpoints([]);
+    setIsBranchesVisible(false);
 
     try {
-      const nextChats = await loadChats(agent.id);
+      const [nextChats] = await Promise.all([loadChats(agent.id), loadCheckpoints(agent.id)]);
       if (nextChats.length > 0) {
         setSelectedChatId(nextChats[0].id);
         await Promise.all([loadMessages(agent.id, nextChats[0].id), loadTraces(agent.id, nextChats[0].id)]);
@@ -373,6 +408,8 @@ export default function App() {
     setChats([]);
     setMessages([]);
     setTraces([]);
+    setCheckpoints([]);
+    setIsBranchesVisible(false);
     setIsEditing(false);
     setError(null);
     setForm({ ...emptyForm, model: models[0]?.id || '' });
@@ -488,6 +525,66 @@ export default function App() {
       setTraces([]);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось создать чат');
+    }
+  }
+
+  async function handleCreateCheckpoint() {
+    if (!selectedAgentId || !selectedChatId || isLoading || messages.length === 0) {
+      return;
+    }
+
+    const title = window.prompt('Название контрольной точки', `Ветка от ${selectedChat?.title ?? 'чата'}`)?.trim();
+    if (!title) {
+      return;
+    }
+
+    try {
+      const response = await fetch(`/api/agents/${selectedAgentId}/chats/${selectedChatId}/checkpoints`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title }),
+      });
+
+      if (!response.ok) {
+        const details = await response.text();
+        throw new Error(details || 'Не удалось сохранить контрольную точку');
+      }
+
+      const checkpoint = (await response.json()) as Checkpoint;
+      setCheckpoints((current) => [checkpoint, ...current]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось сохранить контрольную точку');
+    }
+  }
+
+  async function handleCreateBranch(checkpoint: Checkpoint) {
+    if (!selectedAgentId || isLoading) {
+      return;
+    }
+
+    const title = window.prompt('Название новой ветки', `${checkpoint.title} / ветка`)?.trim();
+    if (!title) {
+      return;
+    }
+
+    try {
+      const response = await fetch(`/api/agents/${selectedAgentId}/checkpoints/${checkpoint.id}/branches`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title }),
+      });
+
+      if (!response.ok) {
+        const details = await response.text();
+        throw new Error(details || 'Не удалось создать ветку');
+      }
+
+      const chat = (await response.json()) as Chat;
+      setChats((current) => [chat, ...current]);
+      setSelectedChatId(chat.id);
+      await Promise.all([loadMessages(selectedAgentId, chat.id), loadTraces(selectedAgentId, chat.id), loadCheckpoints(selectedAgentId)]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось создать ветку');
     }
   }
 
@@ -691,6 +788,7 @@ export default function App() {
                   <option value="compressed">Со сжатием</option>
                   <option value="sliding_window">Скользящее окно</option>
                   <option value="sticky_facts">Sticky facts</option>
+                  <option value="branching">Ветки диалога</option>
                 </select>
               </label>
               <label>
@@ -715,6 +813,8 @@ export default function App() {
             {selectedAgent && (
               <div className="form-actions">
                 <button type="button" onClick={handleCreateChat}>Новый чат</button>
+                {isBranchingMode && <button type="button" onClick={handleCreateCheckpoint} disabled={!selectedChat || messages.length === 0}>Сохранить ветку отсюда</button>}
+                {isBranchingMode && <button className="secondary" type="button" onClick={() => setIsBranchesVisible((current) => !current)}>{isBranchesVisible ? 'Скрыть ветки' : 'Показать ветки'}</button>}
                 <button className="secondary" type="button" onClick={() => setIsAgentsPanelVisible((current) => !current)}>
                   {isAgentsPanelVisible ? 'Скрыть агентов' : 'Показать агентов'}
                 </button>
@@ -728,7 +828,49 @@ export default function App() {
 
           {error && <div className="error">{error}</div>}
 
-          {selectedAgent && (
+          {selectedAgent && isBranchingMode && isBranchesVisible && (
+            <>
+              <details className="branching-details" open>
+                <summary>Checkpoint-ы</summary>
+                <div className="agent-list branching-list branching-checkpoints">
+                  {checkpoints.length === 0 ? (
+                    <div className="empty">Пока нет контрольных точек. Сохраните ветку из текущего чата.</div>
+                  ) : (
+                    checkpoints.map((checkpoint) => (
+                      <div className="agent-card" key={checkpoint.id}>
+                        <strong>{checkpoint.title}</strong>
+                        <span>Checkpoint до #{checkpoint.source_message_ordinal} · {new Date(checkpoint.created_at).toLocaleString('ru-RU')}</span>
+                        <button type="button" onClick={() => handleCreateBranch(checkpoint)}>Создать ветку</button>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </details>
+
+              <div className="agent-list branching-list branching-chats">
+                {chats.length === 0 ? (
+                <div className="empty">У этого агента пока нет чатов. Создайте новый чат.</div>
+              ) : (
+                chats.map((chat) => (
+                  <button
+                    className={`agent-card ${chat.id === selectedChatId ? 'active' : ''}`}
+                    key={chat.id}
+                    type="button"
+                    onClick={() => handleSelectChat(chat)}
+                  >
+                    <strong>{chat.title}</strong>
+                    <span>
+                      {chat.branched_from_ordinal ? `Ветка от #${chat.branched_from_ordinal} · ` : ''}
+                      {new Date(chat.updated_at).toLocaleString('ru-RU')}
+                    </span>
+                  </button>
+                ))
+              )}
+              </div>
+            </>
+          )}
+
+          {selectedAgent && !isBranchingMode && (
             <div className="agent-list">
               {chats.length === 0 ? (
                 <div className="empty">У этого агента пока нет чатов. Создайте новый чат.</div>

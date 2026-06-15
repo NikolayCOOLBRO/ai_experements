@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from schemas import Agent, AgentCreate, AgentRunTrace, Chat, ChatCreate, ChatFact, ChatMessage, StoredChatMessage, SummaryTrace, TokenUsage, TraceMessage
+from schemas import Agent, AgentCreate, AgentRunTrace, BranchCreate, Chat, ChatCreate, ChatFact, ChatMessage, Checkpoint, CheckpointCreate, StoredChatMessage, SummaryTrace, TokenUsage, TraceMessage
 
 
 class AgentStore:
@@ -41,7 +41,26 @@ class AgentStore:
                 title TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
+                parent_checkpoint_id TEXT,
+                branch_title TEXT,
+                branched_from_chat_id TEXT,
+                branched_from_ordinal INTEGER,
                 FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS chat_checkpoints (
+                id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                source_chat_id TEXT NOT NULL,
+                source_message_ordinal INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                agent_snapshot_json TEXT NOT NULL,
+                summary_content TEXT NOT NULL DEFAULT '',
+                summary_covered_until_ordinal INTEGER NOT NULL DEFAULT 0,
+                facts_json TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE,
+                FOREIGN KEY (source_chat_id) REFERENCES chats(id) ON DELETE CASCADE
             );
 
             CREATE TABLE IF NOT EXISTS chat_summaries (
@@ -92,8 +111,10 @@ class AgentStore:
             """
         )
         self._add_missing_agent_columns()
+        self._add_missing_chat_columns()
         self._add_missing_message_columns()
         self._add_missing_trace_columns()
+        self._add_missing_checkpoint_columns()
         self._connection.commit()
 
     def _add_missing_agent_columns(self) -> None:
@@ -120,6 +141,19 @@ class AgentStore:
             if name not in existing_columns:
                 self._connection.execute(f"ALTER TABLE chat_messages ADD COLUMN {name} {definition}")
 
+    def _add_missing_chat_columns(self) -> None:
+        rows = self._connection.execute("PRAGMA table_info(chats)").fetchall()
+        existing_columns = {row["name"] for row in rows}
+        columns = {
+            "parent_checkpoint_id": "TEXT",
+            "branch_title": "TEXT",
+            "branched_from_chat_id": "TEXT",
+            "branched_from_ordinal": "INTEGER",
+        }
+        for name, definition in columns.items():
+            if name not in existing_columns:
+                self._connection.execute(f"ALTER TABLE chats ADD COLUMN {name} {definition}")
+
     def _add_missing_trace_columns(self) -> None:
         rows = self._connection.execute("PRAGMA table_info(agent_run_traces)").fetchall()
         existing_columns = {row["name"] for row in rows}
@@ -129,6 +163,16 @@ class AgentStore:
         for name, definition in columns.items():
             if name not in existing_columns:
                 self._connection.execute(f"ALTER TABLE agent_run_traces ADD COLUMN {name} {definition}")
+
+    def _add_missing_checkpoint_columns(self) -> None:
+        rows = self._connection.execute("PRAGMA table_info(chat_checkpoints)").fetchall()
+        existing_columns = {row["name"] for row in rows}
+        columns = {
+            "facts_json": "TEXT NOT NULL DEFAULT '[]'",
+        }
+        for name, definition in columns.items():
+            if name not in existing_columns:
+                self._connection.execute(f"ALTER TABLE chat_checkpoints ADD COLUMN {name} {definition}")
 
     def _now(self) -> str:
         return datetime.now(timezone.utc).isoformat()
@@ -158,6 +202,20 @@ class AgentStore:
             title=row["title"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            parent_checkpoint_id=row["parent_checkpoint_id"],
+            branch_title=row["branch_title"],
+            branched_from_chat_id=row["branched_from_chat_id"],
+            branched_from_ordinal=row["branched_from_ordinal"],
+        )
+
+    def _row_to_checkpoint(self, row: sqlite3.Row) -> Checkpoint:
+        return Checkpoint(
+            id=row["id"],
+            agent_id=row["agent_id"],
+            source_chat_id=row["source_chat_id"],
+            source_message_ordinal=row["source_message_ordinal"],
+            title=row["title"],
+            created_at=row["created_at"],
         )
 
     def _trace_message_dict(self, message: StoredChatMessage) -> dict[str, object]:
@@ -197,6 +255,16 @@ class AgentStore:
             (chat_id, agent_id),
         ).fetchone()
         return row is not None
+
+    def _checkpoint_exists(self, agent_id: str, checkpoint_id: str) -> bool:
+        row = self._connection.execute(
+            "SELECT 1 FROM chat_checkpoints WHERE id = ? AND agent_id = ?",
+            (checkpoint_id, agent_id),
+        ).fetchone()
+        return row is not None
+
+    def _agent_snapshot(self, agent: Agent) -> str:
+        return json.dumps(agent.model_dump(), ensure_ascii=True)
 
     def list_agents(self) -> list[Agent]:
         rows = self._connection.execute("SELECT * FROM agents ORDER BY name COLLATE NOCASE, id").fetchall()
@@ -294,9 +362,201 @@ class AgentStore:
             updated_at=now,
         )
         self._connection.execute(
-            "INSERT INTO chats (id, agent_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-            (chat.id, chat.agent_id, chat.title, chat.created_at, chat.updated_at),
+            """
+            INSERT INTO chats (
+                id, agent_id, title, created_at, updated_at,
+                parent_checkpoint_id, branch_title, branched_from_chat_id, branched_from_ordinal
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (chat.id, chat.agent_id, chat.title, chat.created_at, chat.updated_at, None, None, None, None),
         )
+        self._connection.commit()
+        return chat
+
+    def list_checkpoints(self, agent_id: str) -> list[Checkpoint] | None:
+        if not self._agent_exists(agent_id):
+            return None
+        rows = self._connection.execute(
+            "SELECT * FROM chat_checkpoints WHERE agent_id = ? ORDER BY created_at DESC",
+            (agent_id,),
+        ).fetchall()
+        return [self._row_to_checkpoint(row) for row in rows]
+
+    def create_checkpoint(self, agent: Agent, chat_id: str, payload: CheckpointCreate) -> Checkpoint | None:
+        if not self._chat_exists(agent.id, chat_id):
+            return None
+        messages = self.get_stored_messages(agent.id, chat_id) or []
+        if not messages:
+            return None
+        max_ordinal = messages[-1].ordinal
+        source_ordinal = payload.source_message_ordinal or max_ordinal
+        if source_ordinal > max_ordinal:
+            return None
+        summary_content, summary_covered_until = self.get_chat_summary(agent.id, chat_id) or ("", 0)
+        facts = [
+            fact.model_dump()
+            for fact in (self.list_chat_facts(agent.id, chat_id) or [])
+            if fact.source_message_ordinal is None or fact.source_message_ordinal <= source_ordinal
+        ]
+        now = self._now()
+        checkpoint = Checkpoint(
+            id=str(uuid4()),
+            agent_id=agent.id,
+            source_chat_id=chat_id,
+            source_message_ordinal=source_ordinal,
+            title=payload.title,
+            created_at=now,
+        )
+        self._connection.execute(
+            """
+            INSERT INTO chat_checkpoints (
+                id, agent_id, source_chat_id, source_message_ordinal, title,
+                agent_snapshot_json, summary_content, summary_covered_until_ordinal, facts_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                checkpoint.id,
+                checkpoint.agent_id,
+                checkpoint.source_chat_id,
+                checkpoint.source_message_ordinal,
+                checkpoint.title,
+                self._agent_snapshot(agent),
+                summary_content,
+                min(summary_covered_until, source_ordinal),
+                json.dumps(facts, ensure_ascii=True),
+                now,
+            ),
+        )
+        self._connection.commit()
+        return checkpoint
+
+    def get_checkpoint(self, agent_id: str, checkpoint_id: str) -> Checkpoint | None:
+        row = self._connection.execute(
+            "SELECT * FROM chat_checkpoints WHERE id = ? AND agent_id = ?",
+            (checkpoint_id, agent_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_checkpoint(row)
+
+    def get_chat_runtime_agent(self, agent_id: str, chat_id: str) -> Agent | None:
+        row = self._connection.execute(
+            "SELECT parent_checkpoint_id FROM chats WHERE id = ? AND agent_id = ?",
+            (chat_id, agent_id),
+        ).fetchone()
+        if row is None:
+            return None
+        checkpoint_id = row["parent_checkpoint_id"]
+        if not checkpoint_id:
+            return self.get_agent(agent_id)
+        snapshot_row = self._connection.execute(
+            "SELECT agent_snapshot_json FROM chat_checkpoints WHERE id = ? AND agent_id = ?",
+            (checkpoint_id, agent_id),
+        ).fetchone()
+        if snapshot_row is None:
+            return self.get_agent(agent_id)
+        return Agent.model_validate(json.loads(snapshot_row["agent_snapshot_json"]))
+
+    def create_branch_from_checkpoint(self, agent_id: str, checkpoint_id: str, payload: BranchCreate) -> Chat | None:
+        if not self._checkpoint_exists(agent_id, checkpoint_id):
+            return None
+        row = self._connection.execute(
+            "SELECT * FROM chat_checkpoints WHERE id = ? AND agent_id = ?",
+            (checkpoint_id, agent_id),
+        ).fetchone()
+        if row is None:
+            return None
+        now = self._now()
+        chat = Chat(
+            id=str(uuid4()),
+            agent_id=agent_id,
+            title=payload.title,
+            created_at=now,
+            updated_at=now,
+            parent_checkpoint_id=checkpoint_id,
+            branch_title=payload.title,
+            branched_from_chat_id=row["source_chat_id"],
+            branched_from_ordinal=row["source_message_ordinal"],
+        )
+        self._connection.execute(
+            """
+            INSERT INTO chats (
+                id, agent_id, title, created_at, updated_at,
+                parent_checkpoint_id, branch_title, branched_from_chat_id, branched_from_ordinal
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                chat.id,
+                chat.agent_id,
+                chat.title,
+                chat.created_at,
+                chat.updated_at,
+                chat.parent_checkpoint_id,
+                chat.branch_title,
+                chat.branched_from_chat_id,
+                chat.branched_from_ordinal,
+            ),
+        )
+        source_messages = self._connection.execute(
+            """
+            SELECT role, content, created_at, ordinal, input_tokens, output_tokens, total_chat_tokens, tokens_estimated
+            FROM chat_messages
+            WHERE chat_id = ? AND ordinal <= ?
+            ORDER BY ordinal ASC
+            """,
+            (row["source_chat_id"], row["source_message_ordinal"]),
+        ).fetchall()
+        for source_message in source_messages:
+            self._connection.execute(
+                """
+                INSERT INTO chat_messages (
+                    id, chat_id, role, content, created_at, ordinal,
+                    input_tokens, output_tokens, total_chat_tokens, tokens_estimated
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(uuid4()),
+                    chat.id,
+                    source_message["role"],
+                    source_message["content"],
+                    source_message["created_at"],
+                    source_message["ordinal"],
+                    source_message["input_tokens"],
+                    source_message["output_tokens"],
+                    source_message["total_chat_tokens"],
+                    source_message["tokens_estimated"],
+                ),
+            )
+        self._connection.execute(
+            """
+            INSERT INTO chat_summaries (chat_id, content, covered_until_ordinal, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                chat.id,
+                row["summary_content"],
+                row["summary_covered_until_ordinal"],
+                now,
+                now,
+            ),
+        )
+        facts = json.loads(row["facts_json"] or "[]")
+        for fact in facts:
+            self._connection.execute(
+                """
+                INSERT INTO chat_facts (chat_id, category, key, value, source_message_ordinal, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    chat.id,
+                    fact["category"],
+                    fact["key"],
+                    fact["value"],
+                    fact.get("source_message_ordinal"),
+                    now,
+                    now,
+                ),
+            )
         self._connection.commit()
         return chat
 

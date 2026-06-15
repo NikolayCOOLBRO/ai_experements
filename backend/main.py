@@ -20,6 +20,7 @@ from llm import (
 from schemas import (
     Agent,
     AgentCreate,
+    BranchCreate,
     AgentRunTracesResponse,
     AgentRunRequest,
     AgentsResponse,
@@ -29,6 +30,9 @@ from schemas import (
     ChatMessagesResponse,
     ChatMessage,
     ChatsResponse,
+    Checkpoint,
+    CheckpointCreate,
+    CheckpointsResponse,
     ModelsResponse,
     SummaryTrace,
     TokenUsage,
@@ -110,6 +114,33 @@ def create_chat(agent_id: str, payload: ChatCreate) -> Chat:
     return chat
 
 
+@app.get("/api/agents/{agent_id}/checkpoints", response_model=CheckpointsResponse)
+def list_checkpoints(agent_id: str) -> CheckpointsResponse:
+    checkpoints = store.list_checkpoints(agent_id)
+    if checkpoints is None:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    return CheckpointsResponse(checkpoints=checkpoints)
+
+
+@app.post("/api/agents/{agent_id}/chats/{chat_id}/checkpoints", response_model=Checkpoint, status_code=201)
+def create_checkpoint(agent_id: str, chat_id: str, payload: CheckpointCreate) -> Checkpoint:
+    agent = store.get_agent(agent_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    checkpoint = store.create_checkpoint(agent, chat_id, payload)
+    if checkpoint is None:
+        raise HTTPException(status_code=404, detail="Chat not found or empty")
+    return checkpoint
+
+
+@app.post("/api/agents/{agent_id}/checkpoints/{checkpoint_id}/branches", response_model=Chat, status_code=201)
+def create_branch(agent_id: str, checkpoint_id: str, payload: BranchCreate) -> Chat:
+    chat = store.create_branch_from_checkpoint(agent_id, checkpoint_id, payload)
+    if chat is None:
+        raise HTTPException(status_code=404, detail="Checkpoint not found")
+    return chat
+
+
 @app.get("/api/agents/{agent_id}/chats/{chat_id}/messages", response_model=ChatMessagesResponse)
 def get_chat_messages(agent_id: str, chat_id: str) -> ChatMessagesResponse:
     messages = store.get_messages(agent_id, chat_id)
@@ -135,9 +166,9 @@ def delete_chat(agent_id: str, chat_id: str) -> Response:
 
 @app.post("/api/agents/{agent_id}/chats/{chat_id}/run/stream")
 def run_agent_stream(agent_id: str, chat_id: str, payload: AgentRunRequest) -> StreamingResponse:
-    agent = store.get_agent(agent_id)
+    agent = store.get_chat_runtime_agent(agent_id, chat_id)
     if agent is None:
-        raise HTTPException(status_code=404, detail="Agent not found")
+        raise HTTPException(status_code=404, detail="Chat or agent not found")
 
     user_message = ChatMessage(role="user", content=payload.message)
     if not store.append_message(agent_id, chat_id, user_message):
