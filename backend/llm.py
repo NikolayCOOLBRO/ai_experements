@@ -1,12 +1,13 @@
 import math
 import os
+import json
 from collections.abc import Generator
 from typing import Literal
 
 from fastapi import HTTPException
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 
-from schemas import Agent, ChatMessage, StoredChatMessage
+from schemas import Agent, ChatFact, ChatMessage, StoredChatMessage
 
 
 StreamChunk = tuple[Literal["delta", "done", "error"], dict[str, object]]
@@ -72,12 +73,22 @@ def format_history(memory: list[ChatMessage]) -> str:
     return "\n".join(f"{message.role}: {message.content}" for message in memory)
 
 
-def build_agent_input(agent: Agent, memory: list[ChatMessage], summary: str = "") -> str:
+def format_facts(facts: list[ChatFact]) -> str:
+    return "\n".join(f"- {fact.category}.{fact.key}: {fact.value}" for fact in facts)
+
+
+def build_agent_input(agent: Agent, memory: list[ChatMessage], summary: str = "", facts: list[ChatFact] | None = None) -> str:
     summary_block = ""
     if summary.strip():
         summary_block = f"""
 Сжатая память чата:
 {summary.strip()}
+"""
+    facts_block = ""
+    if facts:
+        facts_block = f"""
+Sticky facts / Key-Value Memory:
+{format_facts(facts)}
 """
     history = format_history(memory)
     return f"""Ты агент: {agent.name}
@@ -91,10 +102,13 @@ def build_agent_input(agent: Agent, memory: list[ChatMessage], summary: str = ""
 Инструкции:
 - Используй контекст агента как назначение и границы ответственности.
 - Используй планирование как внутренний порядок работы.
+- Используй Sticky facts как устойчивую память чата, если они переданы.
+- Если Sticky facts повлияли на ответ, кратко укажи использованные факты в конце ответа.
 - Не показывай внутренние шаги, если пользователь явно не просит.
 - Отвечай на русском языке, если пользователь не попросил другой язык.
 
 {summary_block}
+{facts_block}
 
 Диалог:
 {history}"""
@@ -124,11 +138,11 @@ def usage_from_response(response: object) -> dict[str, object] | None:
     }
 
 
-def build_request_body(agent: Agent, memory: list[ChatMessage], summary: str = "") -> dict[str, object]:
+def build_request_body(agent: Agent, memory: list[ChatMessage], summary: str = "", facts: list[ChatFact] | None = None) -> dict[str, object]:
     parameters = agent.parameters
     request_body: dict[str, object] = {
         "model": resolve_model(parameters.model),
-        "input": build_agent_input(agent, memory, summary),
+        "input": build_agent_input(agent, memory, summary, facts),
     }
 
     if parameters.max_output_tokens is not None:
@@ -141,9 +155,9 @@ def build_request_body(agent: Agent, memory: list[ChatMessage], summary: str = "
     return request_body
 
 
-def stream_agent_response(agent: Agent, memory: list[ChatMessage], summary: str = "") -> Generator[StreamChunk, None, None]:
+def stream_agent_response(agent: Agent, memory: list[ChatMessage], summary: str = "", facts: list[ChatFact] | None = None) -> Generator[StreamChunk, None, None]:
     try:
-        with client.responses.create(**build_request_body(agent, memory, summary), stream=True) as stream:
+        with client.responses.create(**build_request_body(agent, memory, summary, facts), stream=True) as stream:
             for event in stream:
                 if event.type == "response.output_text.delta":
                     yield "delta", {"text": event.delta}
@@ -165,8 +179,12 @@ def select_context(agent: Agent, memory: list[ChatMessage], summary: str = "") -
 
     context_window = agent.parameters.context_window
     if context_window is None:
-        return memory, summary
-    return memory[-context_window:], summary
+        return memory, summary if agent.parameters.context_mode == "compressed" else ""
+
+    prompt_memory = memory[-context_window:]
+    if agent.parameters.context_mode == "sliding_window":
+        return prompt_memory, ""
+    return prompt_memory, summary
 
 
 def messages_to_summarize(
@@ -227,3 +245,70 @@ def summarize_chat_history(agent: Agent, previous_summary: str, memory: list[Sto
     response = client.responses.create(**request_body)
     summary = getattr(response, "output_text", "")
     return str(summary).strip() or previous_summary
+
+
+def build_facts_input(agent: Agent, current_facts: list[ChatFact], memory: list[StoredChatMessage]) -> str:
+    facts_block = format_facts(current_facts) or "Пока нет сохраненных фактов."
+    history = "\n".join(f"#{message.ordinal} {message.role}: {message.content}" for message in memory)
+    return f"""Обнови Sticky Facts / Key-Value Memory для чата веб-агента.
+
+Агент: {agent.name}
+
+Контекст агента:
+{agent.context}
+
+Текущие facts:
+{facts_block}
+
+Новые сообщения:
+{history}
+
+Категории facts:
+- goal — основная цель, подцели, желаемый результат
+- constraints — жесткие ограничения: бюджет, сроки, табу, запрещенные темы/инструменты
+- preferences — предпочтения: стиль общения, формат ответа, любит/не любит
+- decisions — принятые решения, утвержденные планы, выбранные варианты
+- agreements — договоренности о процессе работы, правила взаимодействия
+- entities — ключевые сущности: имена, даты, места, числа, ссылки, критичные для задачи
+
+Требования:
+- Верни только JSON-массив без markdown и преамбулы.
+- Каждый элемент: {{"category":"goal|constraints|preferences|decisions|agreements|entities","key":"snake_case_key","value":"краткое значение"}}.
+- Верни только новые или изменившиеся facts, которые стоит сохранить надолго.
+- Если facts нет, верни [].
+- Не сохраняй временные детали, обычные реплики и очевидные факты без пользы для будущего ответа.
+- Пиши values на русском языке."""
+
+
+def extract_chat_facts(agent: Agent, current_facts: list[ChatFact], memory: list[StoredChatMessage]) -> list[ChatFact]:
+    if not memory:
+        return []
+
+    parameters = agent.parameters
+    request_body: dict[str, object] = {
+        "model": resolve_model(parameters.model),
+        "input": build_facts_input(agent, current_facts, memory),
+    }
+    if parameters.temperature is not None:
+        request_body["temperature"] = min(parameters.temperature, 0.2)
+    if parameters.top_p is not None:
+        request_body["top_p"] = parameters.top_p
+
+    response = client.responses.create(**request_body)
+    output = str(getattr(response, "output_text", "")).strip()
+    if output.startswith("```"):
+        output = output.strip("`").removeprefix("json").strip()
+    parsed = json.loads(output or "[]")
+    if not isinstance(parsed, list):
+        return []
+
+    source_ordinal = memory[-1].ordinal
+    facts: list[ChatFact] = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        try:
+            facts.append(ChatFact(**item, source_message_ordinal=source_ordinal))
+        except Exception:
+            continue
+    return facts

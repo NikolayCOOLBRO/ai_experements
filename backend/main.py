@@ -10,6 +10,7 @@ from llm import (
     DEFAULT_MODEL,
     build_agent_input,
     estimate_tokens,
+    extract_chat_facts,
     messages_to_summarize,
     select_context,
     sse_event,
@@ -179,6 +180,19 @@ def run_agent_stream(agent_id: str, chat_id: str, payload: AgentRunRequest) -> S
                     yield sse_event("error", {"message": f"Failed to summarize chat history: {exc}"})
                     return
 
+        prompt_facts = []
+        if agent.parameters.context_mode == "sticky_facts":
+            current_facts = store.list_chat_facts(agent_id, chat_id) or []
+            fact_window = current_memory[-(agent.parameters.summary_window or 10):]
+            try:
+                updated_facts = extract_chat_facts(agent, current_facts, fact_window)
+                if updated_facts:
+                    store.upsert_chat_facts(agent_id, chat_id, updated_facts)
+                prompt_facts = store.list_chat_facts(agent_id, chat_id) or []
+            except Exception as exc:
+                yield sse_event("error", {"message": f"Failed to update sticky facts: {exc}"})
+                return
+
         prompt_memory, prompt_summary = select_context(agent, current_memory or [user_message], summary)
         trace_id = store.create_run_trace(
             agent_id,
@@ -187,12 +201,13 @@ def run_agent_stream(agent_id: str, chat_id: str, payload: AgentRunRequest) -> S
             agent.parameters.context_mode,
             agent.parameters.context_window,
             prompt_summary,
+            prompt_facts,
             prompt_memory,
             summary_trace,
         )
         final_usage: TokenUsage | None = None
 
-        for event, data in stream_agent_response(agent, prompt_memory, prompt_summary):
+        for event, data in stream_agent_response(agent, prompt_memory, prompt_summary, prompt_facts):
             if event == "delta":
                 assistant_content += str(data.get("text", ""))
             if event == "done":
@@ -202,7 +217,7 @@ def run_agent_stream(agent_id: str, chat_id: str, payload: AgentRunRequest) -> S
                 estimated = bool(usage.get("estimated", False))
 
                 if not isinstance(input_tokens, int):
-                    input_tokens = estimate_tokens(build_agent_input(agent, prompt_memory, prompt_summary))
+                    input_tokens = estimate_tokens(build_agent_input(agent, prompt_memory, prompt_summary, prompt_facts))
                     estimated = True
                 if not isinstance(output_tokens, int):
                     output_tokens = estimate_tokens(assistant_content)

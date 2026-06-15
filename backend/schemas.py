@@ -38,14 +38,26 @@ class SummaryTrace(BaseModel):
     summarized_messages: list[TraceMessage]
 
 
+FactCategory = Literal["goal", "constraints", "preferences", "decisions", "agreements", "entities"]
+ContextMode = Literal["full", "compressed", "sliding_window", "sticky_facts"]
+
+
+class ChatFact(BaseModel):
+    category: FactCategory
+    key: str = Field(min_length=1, max_length=120)
+    value: str = Field(min_length=1, max_length=2000)
+    source_message_ordinal: int | None = Field(default=None, ge=1)
+
+
 class AgentRunTrace(BaseModel):
     id: str
     created_at: str
     user_message_ordinal: int = Field(ge=1)
     assistant_message_ordinal: int | None = Field(default=None, ge=1)
-    context_mode: Literal["full", "compressed"]
+    context_mode: ContextMode
     context_window: int | None = Field(default=None, ge=1)
     prompt_summary: str = ""
+    prompt_facts: list[ChatFact] = Field(default_factory=list)
     prompt_messages: list[TraceMessage]
     summary: SummaryTrace | None = None
 
@@ -57,7 +69,7 @@ class AgentParameters(BaseModel):
     top_k: int | None = Field(default=None, ge=1)
     max_output_tokens: int | None = Field(default=1024, ge=1, le=393216)
     context_window: int | None = Field(default=20, ge=1, le=200)
-    context_mode: Literal["full", "compressed"] = "full"
+    context_mode: ContextMode = "full"
     summary_window: int = Field(default=10, ge=1, le=100)
 
     @model_validator(mode="after")

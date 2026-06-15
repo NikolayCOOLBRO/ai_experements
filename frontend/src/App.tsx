@@ -22,14 +22,22 @@ type SummaryTrace = {
   summarized_messages: TraceMessage[];
 };
 
+type ChatFact = {
+  category: 'goal' | 'constraints' | 'preferences' | 'decisions' | 'agreements' | 'entities';
+  key: string;
+  value: string;
+  source_message_ordinal?: number | null;
+};
+
 type AgentRunTrace = {
   id: string;
   created_at: string;
   user_message_ordinal: number;
   assistant_message_ordinal?: number | null;
-  context_mode: 'full' | 'compressed';
+  context_mode: 'full' | 'compressed' | 'sliding_window' | 'sticky_facts';
   context_window?: number | null;
   prompt_summary: string;
+  prompt_facts: ChatFact[];
   prompt_messages: TraceMessage[];
   summary?: SummaryTrace | null;
 };
@@ -53,7 +61,7 @@ type AgentParameters = {
   top_k?: number | null;
   max_output_tokens?: number | null;
   context_window?: number | null;
-  context_mode: 'full' | 'compressed';
+  context_mode: 'full' | 'compressed' | 'sliding_window' | 'sticky_facts';
   summary_window: number;
 };
 
@@ -83,7 +91,7 @@ type AgentForm = {
   topK: string;
   maxOutputTokens: string;
   contextWindow: string;
-  contextMode: 'full' | 'compressed';
+  contextMode: 'full' | 'compressed' | 'sliding_window' | 'sticky_facts';
   summaryWindow: string;
 };
 
@@ -195,6 +203,32 @@ function tokenSummary(message: ChatMessage) {
   }
 
   return parts.length > 0 ? parts.join(' · ') : null;
+}
+
+function contextModeLabel(mode: AgentParameters['context_mode']) {
+  if (mode === 'sticky_facts') {
+    return 'Sticky facts';
+  }
+  if (mode === 'compressed') {
+    return 'Со сжатием';
+  }
+  if (mode === 'sliding_window') {
+    return 'Скользящее окно';
+  }
+  return 'Без сжатия';
+}
+
+function contextWindowHint(mode: AgentParameters['context_mode']) {
+  if (mode === 'sticky_facts') {
+    return 'Последние N сообщений идут в prompt, важные факты хранятся отдельно как key-value память.';
+  }
+  if (mode === 'compressed') {
+    return 'Последние N сообщений идут в prompt полностью, старые сжимаются.';
+  }
+  if (mode === 'sliding_window') {
+    return 'Только последние N сообщений идут в prompt, старые отбрасываются.';
+  }
+  return 'В режиме без сжатия история не обрезается.';
 }
 
 export default function App() {
@@ -648,13 +682,15 @@ export default function App() {
               <label>
                 Окно памяти
                 <input min="1" max="200" type="number" value={form.contextWindow} onChange={(event) => setForm({ ...form, contextWindow: event.target.value })} />
-                <small>{form.contextMode === 'compressed' ? 'Последние N сообщений идут в prompt полностью.' : 'В режиме без сжатия история не обрезается.'}</small>
+                <small>{contextWindowHint(form.contextMode)}</small>
               </label>
               <label>
                 Режим контекста
                 <select value={form.contextMode} onChange={(event) => setForm({ ...form, contextMode: event.target.value as AgentForm['contextMode'] })}>
                   <option value="full">Без сжатия</option>
                   <option value="compressed">Со сжатием</option>
+                  <option value="sliding_window">Скользящее окно</option>
+                  <option value="sticky_facts">Sticky facts</option>
                 </select>
               </label>
               <label>
@@ -760,7 +796,7 @@ export default function App() {
         {isTraceVisible && <aside className="panel trace-panel-shell">
           <div className="trace-head">
             <h3>Действия агента</h3>
-            <p>Какие сообщения попали в контекст и как обновлялось summary.</p>
+            <p>Какие сообщения, summary и facts попали в контекст.</p>
           </div>
 
           <div className="trace-list">
@@ -777,7 +813,7 @@ export default function App() {
                   </summary>
 
                   <div className="trace-meta">
-                    <span>Режим: {trace.context_mode === 'compressed' ? 'Со сжатием' : 'Без сжатия'}</span>
+                    <span>Режим: {contextModeLabel(trace.context_mode)}</span>
                     <span>Окно: {trace.context_window ?? 'вся история'}</span>
                     {trace.assistant_message_ordinal && <span>Ответ: #{trace.assistant_message_ordinal}</span>}
                   </div>
@@ -815,6 +851,21 @@ export default function App() {
                       </>
                     ) : (
                       <p>Summary в prompt не передавался.</p>
+                    )}
+                    {(trace.prompt_facts ?? []).length > 0 ? (
+                      <>
+                        <strong>Переданные facts</strong>
+                        <div className="trace-messages">
+                          {(trace.prompt_facts ?? []).map((fact) => (
+                            <article className="trace-message" key={`fact-${trace.id}-${fact.category}-${fact.key}`}>
+                              <span>{fact.category}.{fact.key}{fact.source_message_ordinal ? ` · #${fact.source_message_ordinal}` : ''}</span>
+                              <p>{fact.value}</p>
+                            </article>
+                          ))}
+                        </div>
+                      </>
+                    ) : (
+                      <p>Facts в prompt не передавались.</p>
                     )}
                     <strong>Сообщения</strong>
                     <div className="trace-messages">

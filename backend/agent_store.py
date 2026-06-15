@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from schemas import Agent, AgentCreate, AgentRunTrace, Chat, ChatCreate, ChatMessage, StoredChatMessage, SummaryTrace, TokenUsage, TraceMessage
+from schemas import Agent, AgentCreate, AgentRunTrace, Chat, ChatCreate, ChatFact, ChatMessage, StoredChatMessage, SummaryTrace, TokenUsage, TraceMessage
 
 
 class AgentStore:
@@ -72,14 +72,28 @@ class AgentStore:
                 context_mode TEXT NOT NULL,
                 context_window INTEGER,
                 prompt_summary TEXT NOT NULL DEFAULT '',
+                prompt_facts_json TEXT NOT NULL DEFAULT '[]',
                 prompt_messages_json TEXT NOT NULL,
                 summary_json TEXT,
+                FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS chat_facts (
+                chat_id TEXT NOT NULL,
+                category TEXT NOT NULL CHECK(category IN ('goal', 'constraints', 'preferences', 'decisions', 'agreements', 'entities')),
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                source_message_ordinal INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (chat_id, category, key),
                 FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE
             );
             """
         )
         self._add_missing_agent_columns()
         self._add_missing_message_columns()
+        self._add_missing_trace_columns()
         self._connection.commit()
 
     def _add_missing_agent_columns(self) -> None:
@@ -105,6 +119,16 @@ class AgentStore:
         for name, definition in columns.items():
             if name not in existing_columns:
                 self._connection.execute(f"ALTER TABLE chat_messages ADD COLUMN {name} {definition}")
+
+    def _add_missing_trace_columns(self) -> None:
+        rows = self._connection.execute("PRAGMA table_info(agent_run_traces)").fetchall()
+        existing_columns = {row["name"] for row in rows}
+        columns = {
+            "prompt_facts_json": "TEXT NOT NULL DEFAULT '[]'",
+        }
+        for name, definition in columns.items():
+            if name not in existing_columns:
+                self._connection.execute(f"ALTER TABLE agent_run_traces ADD COLUMN {name} {definition}")
 
     def _now(self) -> str:
         return datetime.now(timezone.utc).isoformat()
@@ -146,6 +170,7 @@ class AgentStore:
 
     def _row_to_trace(self, row: sqlite3.Row) -> AgentRunTrace:
         prompt_messages = [TraceMessage.model_validate(item) for item in json.loads(row["prompt_messages_json"])]
+        prompt_facts = [ChatFact.model_validate(item) for item in json.loads(row["prompt_facts_json"] or "[]")]
         summary = None
         if row["summary_json"]:
             summary = SummaryTrace.model_validate(json.loads(row["summary_json"]))
@@ -157,6 +182,7 @@ class AgentStore:
             context_mode=row["context_mode"],
             context_window=row["context_window"],
             prompt_summary=row["prompt_summary"],
+            prompt_facts=prompt_facts,
             prompt_messages=prompt_messages,
             summary=summary,
         )
@@ -356,6 +382,28 @@ class AgentStore:
         ).fetchall()
         return [self._row_to_trace(row) for row in rows]
 
+    def list_chat_facts(self, agent_id: str, chat_id: str) -> list[ChatFact] | None:
+        if not self._chat_exists(agent_id, chat_id):
+            return None
+        rows = self._connection.execute(
+            """
+            SELECT category, key, value, source_message_ordinal
+            FROM chat_facts
+            WHERE chat_id = ?
+            ORDER BY category ASC, key ASC
+            """,
+            (chat_id,),
+        ).fetchall()
+        return [
+            ChatFact(
+                category=row["category"],
+                key=row["key"],
+                value=row["value"],
+                source_message_ordinal=row["source_message_ordinal"],
+            )
+            for row in rows
+        ]
+
     def create_run_trace(
         self,
         agent_id: str,
@@ -364,6 +412,7 @@ class AgentStore:
         context_mode: str,
         context_window: int | None,
         prompt_summary: str,
+        prompt_facts: list[ChatFact],
         prompt_messages: list[StoredChatMessage],
         summary: SummaryTrace | None,
     ) -> str | None:
@@ -374,8 +423,8 @@ class AgentStore:
             """
             INSERT INTO agent_run_traces (
                 id, chat_id, created_at, user_message_ordinal, assistant_message_ordinal,
-                context_mode, context_window, prompt_summary, prompt_messages_json, summary_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                context_mode, context_window, prompt_summary, prompt_facts_json, prompt_messages_json, summary_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 trace_id,
@@ -386,12 +435,34 @@ class AgentStore:
                 context_mode,
                 context_window,
                 prompt_summary,
+                json.dumps([fact.model_dump() for fact in prompt_facts], ensure_ascii=True),
                 json.dumps([self._trace_message_dict(message) for message in prompt_messages], ensure_ascii=True),
                 json.dumps(summary.model_dump(), ensure_ascii=True) if summary else None,
             ),
         )
         self._connection.commit()
         return trace_id
+
+    def upsert_chat_facts(self, agent_id: str, chat_id: str, facts: list[ChatFact]) -> bool:
+        if not self._chat_exists(agent_id, chat_id):
+            return False
+        if not facts:
+            return True
+        now = self._now()
+        for fact in facts:
+            self._connection.execute(
+                """
+                INSERT INTO chat_facts (chat_id, category, key, value, source_message_ordinal, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(chat_id, category, key) DO UPDATE SET
+                    value = excluded.value,
+                    source_message_ordinal = excluded.source_message_ordinal,
+                    updated_at = excluded.updated_at
+                """,
+                (chat_id, fact.category, fact.key, fact.value, fact.source_message_ordinal, now, now),
+            )
+        self._connection.commit()
+        return True
 
     def update_run_trace_assistant_ordinal(self, trace_id: str, assistant_message_ordinal: int) -> bool:
         cursor = self._connection.execute(
