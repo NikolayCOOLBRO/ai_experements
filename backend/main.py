@@ -19,6 +19,7 @@ from llm import (
 from schemas import (
     Agent,
     AgentCreate,
+    AgentRunTracesResponse,
     AgentRunRequest,
     AgentsResponse,
     AiModel,
@@ -28,7 +29,9 @@ from schemas import (
     ChatMessage,
     ChatsResponse,
     ModelsResponse,
+    SummaryTrace,
     TokenUsage,
+    TraceMessage,
 )
 
 
@@ -114,6 +117,14 @@ def get_chat_messages(agent_id: str, chat_id: str) -> ChatMessagesResponse:
     return ChatMessagesResponse(messages=messages)
 
 
+@app.get("/api/agents/{agent_id}/chats/{chat_id}/traces", response_model=AgentRunTracesResponse)
+def get_chat_traces(agent_id: str, chat_id: str) -> AgentRunTracesResponse:
+    traces = store.list_run_traces(agent_id, chat_id)
+    if traces is None:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    return AgentRunTracesResponse(traces=traces)
+
+
 @app.delete("/api/agents/{agent_id}/chats/{chat_id}", status_code=204)
 def delete_chat(agent_id: str, chat_id: str) -> Response:
     if not store.delete_chat(agent_id, chat_id):
@@ -134,12 +145,15 @@ def run_agent_stream(agent_id: str, chat_id: str, payload: AgentRunRequest) -> S
     def stream_events() -> Generator[str, None, None]:
         assistant_content = ""
         current_memory = store.get_stored_messages(agent_id, chat_id) or []
+        user_message_ordinal = current_memory[-1].ordinal if current_memory else 1
         summary = ""
         summary_state = store.get_chat_summary(agent_id, chat_id)
         if summary_state is not None:
             summary, covered_until_ordinal = summary_state
         else:
             covered_until_ordinal = 0
+        previous_summary = summary
+        summary_trace: SummaryTrace | None = None
 
         if agent.parameters.context_mode == "compressed":
             summary_batch = messages_to_summarize(agent, current_memory, covered_until_ordinal)
@@ -147,11 +161,35 @@ def run_agent_stream(agent_id: str, chat_id: str, payload: AgentRunRequest) -> S
                 try:
                     summary = summarize_chat_history(agent, summary, summary_batch)
                     store.upsert_chat_summary(agent_id, chat_id, summary, summary_batch[-1].ordinal)
+                    summary_trace = SummaryTrace(
+                        previous_summary=previous_summary,
+                        new_summary=summary,
+                        covered_until_ordinal=summary_batch[-1].ordinal,
+                        summarized_messages=[
+                            TraceMessage(
+                                ordinal=message.ordinal,
+                                role=message.role,
+                                content=message.content,
+                                tokens=message.tokens,
+                            )
+                            for message in summary_batch
+                        ],
+                    )
                 except Exception as exc:
                     yield sse_event("error", {"message": f"Failed to summarize chat history: {exc}"})
                     return
 
         prompt_memory, prompt_summary = select_context(agent, current_memory or [user_message], summary)
+        trace_id = store.create_run_trace(
+            agent_id,
+            chat_id,
+            user_message_ordinal,
+            agent.parameters.context_mode,
+            agent.parameters.context_window,
+            prompt_summary,
+            prompt_memory,
+            summary_trace,
+        )
         final_usage: TokenUsage | None = None
 
         for event, data in stream_agent_response(agent, prompt_memory, prompt_summary):
@@ -183,5 +221,8 @@ def run_agent_stream(agent_id: str, chat_id: str, payload: AgentRunRequest) -> S
 
         if assistant_content.strip():
             store.append_message(agent_id, chat_id, ChatMessage(role="assistant", content=assistant_content.strip(), tokens=final_usage))
+            assistant_message_ordinal = store.get_last_message_ordinal(agent_id, chat_id, "assistant")
+            if trace_id is not None and assistant_message_ordinal is not None:
+                store.update_run_trace_assistant_ordinal(trace_id, assistant_message_ordinal)
 
     return StreamingResponse(stream_events(), media_type="text/event-stream")

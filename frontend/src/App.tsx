@@ -11,6 +11,29 @@ type ChatMessage = {
   } | null;
 };
 
+type TraceMessage = ChatMessage & {
+  ordinal: number;
+};
+
+type SummaryTrace = {
+  previous_summary: string;
+  new_summary: string;
+  covered_until_ordinal: number;
+  summarized_messages: TraceMessage[];
+};
+
+type AgentRunTrace = {
+  id: string;
+  created_at: string;
+  user_message_ordinal: number;
+  assistant_message_ordinal?: number | null;
+  context_mode: 'full' | 'compressed';
+  context_window?: number | null;
+  prompt_summary: string;
+  prompt_messages: TraceMessage[];
+  summary?: SummaryTrace | null;
+};
+
 type AiModel = {
   id: string;
   label: string;
@@ -181,9 +204,12 @@ export default function App() {
   const [chats, setChats] = useState<Chat[]>([]);
   const [selectedChatId, setSelectedChatId] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [traces, setTraces] = useState<AgentRunTrace[]>([]);
   const [form, setForm] = useState<AgentForm>(emptyForm);
   const [task, setTask] = useState('');
   const [isEditing, setIsEditing] = useState(false);
+  const [isAgentsPanelVisible, setIsAgentsPanelVisible] = useState(true);
+  const [isTraceVisible, setIsTraceVisible] = useState(true);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const selectedModel = models.find((model) => model.id === form.model);
@@ -253,6 +279,16 @@ export default function App() {
     setMessages(data.messages);
   }
 
+  async function loadTraces(agentId: string, chatId: string) {
+    const response = await fetch(`/api/agents/${agentId}/chats/${chatId}/traces`);
+    if (!response.ok) {
+      throw new Error('Не удалось загрузить действия агента');
+    }
+
+    const data = (await response.json()) as { traces: AgentRunTrace[] };
+    setTraces(data.traces);
+  }
+
   async function handleSelectChat(chat: Chat) {
     if (isLoading || !selectedAgentId) {
       return;
@@ -262,7 +298,7 @@ export default function App() {
     setError(null);
 
     try {
-      await loadMessages(selectedAgentId, chat.id);
+      await Promise.all([loadMessages(selectedAgentId, chat.id), loadTraces(selectedAgentId, chat.id)]);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось загрузить сообщения');
     }
@@ -280,12 +316,13 @@ export default function App() {
     setIsEditing(true);
     setError(null);
     setMessages([]);
+    setTraces([]);
 
     try {
       const nextChats = await loadChats(agent.id);
       if (nextChats.length > 0) {
         setSelectedChatId(nextChats[0].id);
-        await loadMessages(agent.id, nextChats[0].id);
+        await Promise.all([loadMessages(agent.id, nextChats[0].id), loadTraces(agent.id, nextChats[0].id)]);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось загрузить чаты агента');
@@ -301,6 +338,7 @@ export default function App() {
     setSelectedChatId('');
     setChats([]);
     setMessages([]);
+    setTraces([]);
     setIsEditing(false);
     setError(null);
     setForm({ ...emptyForm, model: models[0]?.id || '' });
@@ -380,9 +418,10 @@ export default function App() {
       if (nextChats.length === 0) {
         setSelectedChatId('');
         setMessages([]);
+        setTraces([]);
       } else {
         setSelectedChatId(nextChats[0].id);
-        await loadMessages(selectedAgentId, nextChats[0].id);
+        await Promise.all([loadMessages(selectedAgentId, nextChats[0].id), loadTraces(selectedAgentId, nextChats[0].id)]);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось удалить чат');
@@ -412,6 +451,7 @@ export default function App() {
       setChats((current) => [chat, ...current]);
       setSelectedChatId(chat.id);
       setMessages([]);
+      setTraces([]);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось создать чат');
     }
@@ -504,7 +544,7 @@ export default function App() {
       setIsLoading(false);
       if (selectedAgentId && selectedChatId) {
         try {
-          await loadMessages(selectedAgentId, selectedChatId);
+          await Promise.all([loadMessages(selectedAgentId, selectedChatId), loadTraces(selectedAgentId, selectedChatId)]);
           const nextChats = await loadChats(selectedAgentId);
           setChats(nextChats);
         } catch {
@@ -524,8 +564,8 @@ export default function App() {
         <span className="status">Backend memory</span>
       </header>
 
-      <section className="workspace">
-        <aside className="panel agents-panel">
+      <section className={`workspace ${isAgentsPanelVisible ? '' : 'agents-hidden'} ${isTraceVisible ? '' : 'trace-hidden'}`}>
+        {isAgentsPanelVisible && <aside className="panel agents-panel">
           <div className="panel-head">
             <div>
               <h2>Агенты</h2>
@@ -628,7 +668,7 @@ export default function App() {
               {selectedAgent && <button className="danger" type="button" onClick={handleDeleteAgent}>Удалить</button>}
             </div>
           </form>
-        </aside>
+        </aside>}
 
         <section className="panel chat-panel">
           <div className="panel-head">
@@ -639,6 +679,12 @@ export default function App() {
             {selectedAgent && (
               <div className="form-actions">
                 <button type="button" onClick={handleCreateChat}>Новый чат</button>
+                <button className="secondary" type="button" onClick={() => setIsAgentsPanelVisible((current) => !current)}>
+                  {isAgentsPanelVisible ? 'Скрыть агентов' : 'Показать агентов'}
+                </button>
+                <button className="secondary" type="button" onClick={() => setIsTraceVisible((current) => !current)}>
+                  {isTraceVisible ? 'Скрыть действия' : 'Показать действия'}
+                </button>
                 {selectedChat && <button className="danger" type="button" onClick={handleDeleteChat}>Удалить чат</button>}
               </div>
             )}
@@ -710,6 +756,81 @@ export default function App() {
             )}
           </form>
         </section>
+
+        {isTraceVisible && <aside className="panel trace-panel-shell">
+          <div className="trace-head">
+            <h3>Действия агента</h3>
+            <p>Какие сообщения попали в контекст и как обновлялось summary.</p>
+          </div>
+
+          <div className="trace-list">
+            {!selectedAgent || !selectedChat ? (
+              <div className="empty">Выберите чат, чтобы увидеть действия запуска.</div>
+            ) : traces.length === 0 ? (
+              <div className="empty">Пока нет запусков для этого чата.</div>
+            ) : (
+              traces.map((trace) => (
+                <details className="trace-card" key={trace.id}>
+                  <summary>
+                    <span>Запуск по сообщению #{trace.user_message_ordinal}</span>
+                    <small>{new Date(trace.created_at).toLocaleString('ru-RU')}</small>
+                  </summary>
+
+                  <div className="trace-meta">
+                    <span>Режим: {trace.context_mode === 'compressed' ? 'Со сжатием' : 'Без сжатия'}</span>
+                    <span>Окно: {trace.context_window ?? 'вся история'}</span>
+                    {trace.assistant_message_ordinal && <span>Ответ: #{trace.assistant_message_ordinal}</span>}
+                  </div>
+
+                  {trace.summary && (
+                    <section className="trace-section">
+                      <h4>Summary</h4>
+                      <p>Сжаты сообщения до #{trace.summary.covered_until_ordinal}.</p>
+                      {trace.summary.previous_summary && (
+                        <>
+                          <strong>Было</strong>
+                          <pre>{trace.summary.previous_summary}</pre>
+                        </>
+                      )}
+                      <strong>Стало</strong>
+                      <pre>{trace.summary.new_summary}</pre>
+                      <strong>Что сжимали</strong>
+                      <div className="trace-messages">
+                        {trace.summary.summarized_messages.map((message) => (
+                          <article className="trace-message" key={`summary-${trace.id}-${message.ordinal}`}>
+                            <span>#{message.ordinal} · {message.role === 'user' ? 'user' : 'assistant'}</span>
+                            <p>{message.content}</p>
+                          </article>
+                        ))}
+                      </div>
+                    </section>
+                  )}
+
+                  <section className="trace-section">
+                    <h4>Контекст prompt</h4>
+                    {trace.prompt_summary ? (
+                      <>
+                        <strong>Переданный summary</strong>
+                        <pre>{trace.prompt_summary}</pre>
+                      </>
+                    ) : (
+                      <p>Summary в prompt не передавался.</p>
+                    )}
+                    <strong>Сообщения</strong>
+                    <div className="trace-messages">
+                      {trace.prompt_messages.map((message) => (
+                        <article className="trace-message" key={`prompt-${trace.id}-${message.ordinal}`}>
+                          <span>#{message.ordinal} · {message.role === 'user' ? 'user' : 'assistant'}</span>
+                          <p>{message.content}</p>
+                        </article>
+                      ))}
+                    </div>
+                  </section>
+                </details>
+              ))
+            )}
+          </div>
+        </aside>}
       </section>
     </main>
   );

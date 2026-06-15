@@ -27,6 +27,29 @@ class StoredChatMessage(ChatMessage):
     ordinal: int = Field(ge=1)
 
 
+class TraceMessage(ChatMessage):
+    ordinal: int = Field(ge=1)
+
+
+class SummaryTrace(BaseModel):
+    previous_summary: str = ""
+    new_summary: str = ""
+    covered_until_ordinal: int = Field(ge=0)
+    summarized_messages: list[TraceMessage]
+
+
+class AgentRunTrace(BaseModel):
+    id: str
+    created_at: str
+    user_message_ordinal: int = Field(ge=1)
+    assistant_message_ordinal: int | None = Field(default=None, ge=1)
+    context_mode: Literal["full", "compressed"]
+    context_window: int | None = Field(default=None, ge=1)
+    prompt_summary: str = ""
+    prompt_messages: list[TraceMessage]
+    summary: SummaryTrace | None = None
+
+
 class AgentParameters(BaseModel):
     model: str
     temperature: float | None = Field(default=1, ge=0, le=2)
@@ -102,6 +125,10 @@ class ChatsResponse(BaseModel):
 
 class ChatMessagesResponse(BaseModel):
     messages: list[ChatMessage]
+
+
+class AgentRunTracesResponse(BaseModel):
+    traces: list[AgentRunTrace]
 
 
 class AgentRunRequest(BaseModel):

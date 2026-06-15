@@ -1,10 +1,11 @@
 import os
+import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from schemas import Agent, AgentCreate, Chat, ChatCreate, ChatMessage, StoredChatMessage, TokenUsage
+from schemas import Agent, AgentCreate, AgentRunTrace, Chat, ChatCreate, ChatMessage, StoredChatMessage, SummaryTrace, TokenUsage, TraceMessage
 
 
 class AgentStore:
@@ -59,6 +60,20 @@ class AgentStore:
                 content TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 ordinal INTEGER NOT NULL,
+                FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS agent_run_traces (
+                id TEXT PRIMARY KEY,
+                chat_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                user_message_ordinal INTEGER NOT NULL,
+                assistant_message_ordinal INTEGER,
+                context_mode TEXT NOT NULL,
+                context_window INTEGER,
+                prompt_summary TEXT NOT NULL DEFAULT '',
+                prompt_messages_json TEXT NOT NULL,
+                summary_json TEXT,
                 FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE
             );
             """
@@ -119,6 +134,31 @@ class AgentStore:
             title=row["title"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+        )
+
+    def _trace_message_dict(self, message: StoredChatMessage) -> dict[str, object]:
+        return {
+            "ordinal": message.ordinal,
+            "role": message.role,
+            "content": message.content,
+            "tokens": message.tokens.model_dump() if message.tokens else None,
+        }
+
+    def _row_to_trace(self, row: sqlite3.Row) -> AgentRunTrace:
+        prompt_messages = [TraceMessage.model_validate(item) for item in json.loads(row["prompt_messages_json"])]
+        summary = None
+        if row["summary_json"]:
+            summary = SummaryTrace.model_validate(json.loads(row["summary_json"]))
+        return AgentRunTrace(
+            id=row["id"],
+            created_at=row["created_at"],
+            user_message_ordinal=row["user_message_ordinal"],
+            assistant_message_ordinal=row["assistant_message_ordinal"],
+            context_mode=row["context_mode"],
+            context_window=row["context_window"],
+            prompt_summary=row["prompt_summary"],
+            prompt_messages=prompt_messages,
+            summary=summary,
         )
 
     def _agent_exists(self, agent_id: str) -> bool:
@@ -303,6 +343,64 @@ class AgentStore:
             return "", 0
         return row["content"], int(row["covered_until_ordinal"])
 
+    def list_run_traces(self, agent_id: str, chat_id: str) -> list[AgentRunTrace] | None:
+        if not self._chat_exists(agent_id, chat_id):
+            return None
+        rows = self._connection.execute(
+            """
+            SELECT * FROM agent_run_traces
+            WHERE chat_id = ?
+            ORDER BY user_message_ordinal ASC, created_at ASC
+            """,
+            (chat_id,),
+        ).fetchall()
+        return [self._row_to_trace(row) for row in rows]
+
+    def create_run_trace(
+        self,
+        agent_id: str,
+        chat_id: str,
+        user_message_ordinal: int,
+        context_mode: str,
+        context_window: int | None,
+        prompt_summary: str,
+        prompt_messages: list[StoredChatMessage],
+        summary: SummaryTrace | None,
+    ) -> str | None:
+        if not self._chat_exists(agent_id, chat_id):
+            return None
+        trace_id = str(uuid4())
+        self._connection.execute(
+            """
+            INSERT INTO agent_run_traces (
+                id, chat_id, created_at, user_message_ordinal, assistant_message_ordinal,
+                context_mode, context_window, prompt_summary, prompt_messages_json, summary_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                trace_id,
+                chat_id,
+                self._now(),
+                user_message_ordinal,
+                None,
+                context_mode,
+                context_window,
+                prompt_summary,
+                json.dumps([self._trace_message_dict(message) for message in prompt_messages], ensure_ascii=True),
+                json.dumps(summary.model_dump(), ensure_ascii=True) if summary else None,
+            ),
+        )
+        self._connection.commit()
+        return trace_id
+
+    def update_run_trace_assistant_ordinal(self, trace_id: str, assistant_message_ordinal: int) -> bool:
+        cursor = self._connection.execute(
+            "UPDATE agent_run_traces SET assistant_message_ordinal = ? WHERE id = ?",
+            (assistant_message_ordinal, trace_id),
+        )
+        self._connection.commit()
+        return cursor.rowcount > 0
+
     def upsert_chat_summary(self, agent_id: str, chat_id: str, content: str, covered_until_ordinal: int) -> bool:
         if not self._chat_exists(agent_id, chat_id):
             return False
@@ -353,6 +451,20 @@ class AgentStore:
         self._connection.execute("UPDATE chats SET updated_at = ? WHERE id = ?", (now, chat_id))
         self._connection.commit()
         return True
+
+    def get_last_message_ordinal(self, agent_id: str, chat_id: str, role: str | None = None) -> int | None:
+        if not self._chat_exists(agent_id, chat_id):
+            return None
+        query = "SELECT ordinal FROM chat_messages WHERE chat_id = ?"
+        params: list[object] = [chat_id]
+        if role is not None:
+            query += " AND role = ?"
+            params.append(role)
+        query += " ORDER BY ordinal DESC LIMIT 1"
+        row = self._connection.execute(query, tuple(params)).fetchone()
+        if row is None:
+            return None
+        return int(row["ordinal"])
 
     def update_last_user_message_tokens(self, agent_id: str, chat_id: str, tokens: TokenUsage) -> bool:
         if not self._chat_exists(agent_id, chat_id):
