@@ -1,5 +1,7 @@
 .env
 
+cli/
+
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -10,6 +12,7 @@ venv/
 node_modules/
 dist/
 .vite/
+cli/.agent-cli-state.json
 
 .DS_Store
 Thumbs.db

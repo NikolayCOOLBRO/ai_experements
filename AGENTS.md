@@ -1,5 +1,15 @@
 # AGENTS.md
 
+## Pipline работы
+1. Рассуждай последовательно;
+2. Прогоняй каждыое рассуждение как будто ты 4 разных специалиста:
+ a) Senior Инженер-программист с бэкенд опытом - принимаешь все решение через призму HighLoad, HighPerformece, и гибких систем;
+ б) Senior Инженер-программист с фронтенд опытом - принимаешь каждое решение, как максимально переиспользуемое;
+ в) UI/UX дизайнер - примаешь решения с точки зрения использования, конечного продукта;
+ г) Главный архитектор - смотришь на все рассуждения предыдущих и ищешь недочёт в остальных;
+3. После этого ты должен составить итоговый план и получить одобрение на разработку;
+
+
 ## Project Shape
 - Backend is a FastAPI agent workspace. Routes live in `backend/main.py`; schemas are in `backend/schemas.py`; OpenAI-compatible LLM calls are isolated in `backend/llm.py`; SQLite-backed agent, chat, summary, and trace storage is in `backend/agent_store.py`.
 - Backend Docker builds `backend/requirements.txt` and copies the whole `backend/` directory, because the app now uses multiple Python modules.
