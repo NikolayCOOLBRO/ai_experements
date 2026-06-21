@@ -40,6 +40,74 @@ class SummaryTrace(BaseModel):
 
 FactCategory = Literal["goal", "constraints", "preferences", "decisions", "agreements", "entities"]
 ContextMode = Literal["full", "compressed", "sliding_window", "sticky_facts", "branching"]
+MemoryLayer = Literal["short_term", "working", "long_term"]
+MemoryAction = Literal["upsert", "delete"]
+
+
+class WorkingMemoryItem(BaseModel):
+    key: str = Field(min_length=1, max_length=120)
+    value: str = Field(min_length=1, max_length=4000)
+    tags: list[str] = Field(default_factory=list)
+    task_tag: str | None = Field(default=None, min_length=1, max_length=120)
+    source_message_ordinal: int | None = Field(default=None, ge=1)
+    created_at: str
+    updated_at: str
+
+
+class LongTermMemoryItem(BaseModel):
+    id: str
+    category: FactCategory
+    key: str = Field(min_length=1, max_length=120)
+    value: str = Field(min_length=1, max_length=4000)
+    tags: list[str] = Field(default_factory=list)
+    source_chat_id: str | None = None
+    source_message_ordinal: int | None = Field(default=None, ge=1)
+    created_at: str
+    updated_at: str
+
+
+class MemoryWriteRecord(BaseModel):
+    id: str
+    layer: MemoryLayer
+    action: MemoryAction
+    key: str = Field(min_length=1, max_length=120)
+    value: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    task_tag: str | None = None
+    reason: str = Field(min_length=1, max_length=4000)
+    source_message_ordinal: int | None = Field(default=None, ge=1)
+    created_at: str
+
+
+class WorkingMemoryUpsert(BaseModel):
+    key: str = Field(min_length=1, max_length=120)
+    value: str = Field(min_length=1, max_length=4000)
+    tags: list[str] = Field(default_factory=list)
+    task_tag: str | None = Field(default=None, min_length=1, max_length=120)
+    reason: str = Field(min_length=1, max_length=4000)
+    source_message_ordinal: int | None = Field(default=None, ge=1)
+
+
+class LongTermMemoryUpsert(BaseModel):
+    category: FactCategory
+    key: str = Field(min_length=1, max_length=120)
+    value: str = Field(min_length=1, max_length=4000)
+    tags: list[str] = Field(default_factory=list)
+    reason: str = Field(min_length=1, max_length=4000)
+    source_chat_id: str | None = None
+    source_message_ordinal: int | None = Field(default=None, ge=1)
+
+
+class WorkingMemoryResponse(BaseModel):
+    items: list[WorkingMemoryItem]
+
+
+class LongTermMemoryResponse(BaseModel):
+    items: list[LongTermMemoryItem]
+
+
+class MemoryWritesResponse(BaseModel):
+    writes: list[MemoryWriteRecord]
 
 
 class ChatFact(BaseModel):
@@ -58,6 +126,10 @@ class AgentRunTrace(BaseModel):
     context_window: int | None = Field(default=None, ge=1)
     prompt_summary: str = ""
     prompt_facts: list[ChatFact] = Field(default_factory=list)
+    short_term_memory: list[TraceMessage] = Field(default_factory=list)
+    working_memory: list[WorkingMemoryItem] = Field(default_factory=list)
+    long_term_memory: list[LongTermMemoryItem] = Field(default_factory=list)
+    memory_writes: list[MemoryWriteRecord] = Field(default_factory=list)
     prompt_messages: list[TraceMessage]
     summary: SummaryTrace | None = None
 

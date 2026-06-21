@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from schemas import Agent, AgentCreate, AgentRunTrace, BranchCreate, Chat, ChatCreate, ChatFact, ChatMessage, Checkpoint, CheckpointCreate, StoredChatMessage, SummaryTrace, TokenUsage, TraceMessage
+from schemas import Agent, AgentCreate, AgentRunTrace, BranchCreate, Chat, ChatCreate, ChatFact, ChatMessage, Checkpoint, CheckpointCreate, LongTermMemoryItem, LongTermMemoryUpsert, MemoryWriteRecord, StoredChatMessage, SummaryTrace, TokenUsage, TraceMessage, WorkingMemoryItem, WorkingMemoryUpsert
 
 
 class AgentStore:
@@ -108,6 +108,51 @@ class AgentStore:
                 PRIMARY KEY (chat_id, category, key),
                 FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS working_memory (
+                chat_id TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                tags_json TEXT NOT NULL DEFAULT '[]',
+                task_tag TEXT,
+                source_message_ordinal INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (chat_id, key),
+                FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS long_term_memory (
+                id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                category TEXT NOT NULL CHECK(category IN ('goal', 'constraints', 'preferences', 'decisions', 'agreements', 'entities')),
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                tags_json TEXT NOT NULL DEFAULT '[]',
+                source_chat_id TEXT,
+                source_message_ordinal INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(agent_id, category, key),
+                FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS memory_writes (
+                id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                chat_id TEXT,
+                layer TEXT NOT NULL CHECK(layer IN ('short_term', 'working', 'long_term')),
+                action TEXT NOT NULL CHECK(action IN ('upsert', 'delete')),
+                key TEXT NOT NULL,
+                value TEXT,
+                tags_json TEXT NOT NULL DEFAULT '[]',
+                task_tag TEXT,
+                reason TEXT NOT NULL,
+                source_message_ordinal INTEGER,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE,
+                FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE
+            );
             """
         )
         self._add_missing_agent_columns()
@@ -159,6 +204,10 @@ class AgentStore:
         existing_columns = {row["name"] for row in rows}
         columns = {
             "prompt_facts_json": "TEXT NOT NULL DEFAULT '[]'",
+            "short_term_memory_json": "TEXT NOT NULL DEFAULT '[]'",
+            "working_memory_json": "TEXT NOT NULL DEFAULT '[]'",
+            "long_term_memory_json": "TEXT NOT NULL DEFAULT '[]'",
+            "memory_writes_json": "TEXT NOT NULL DEFAULT '[]'",
         }
         for name, definition in columns.items():
             if name not in existing_columns:
@@ -229,6 +278,10 @@ class AgentStore:
     def _row_to_trace(self, row: sqlite3.Row) -> AgentRunTrace:
         prompt_messages = [TraceMessage.model_validate(item) for item in json.loads(row["prompt_messages_json"])]
         prompt_facts = [ChatFact.model_validate(item) for item in json.loads(row["prompt_facts_json"] or "[]")]
+        short_term_memory = [TraceMessage.model_validate(item) for item in json.loads(row["short_term_memory_json"] or "[]")]
+        working_memory = [WorkingMemoryItem.model_validate(item) for item in json.loads(row["working_memory_json"] or "[]")]
+        long_term_memory = [LongTermMemoryItem.model_validate(item) for item in json.loads(row["long_term_memory_json"] or "[]")]
+        memory_writes = [MemoryWriteRecord.model_validate(item) for item in json.loads(row["memory_writes_json"] or "[]")]
         summary = None
         if row["summary_json"]:
             summary = SummaryTrace.model_validate(json.loads(row["summary_json"]))
@@ -241,8 +294,50 @@ class AgentStore:
             context_window=row["context_window"],
             prompt_summary=row["prompt_summary"],
             prompt_facts=prompt_facts,
+            short_term_memory=short_term_memory,
+            working_memory=working_memory,
+            long_term_memory=long_term_memory,
+            memory_writes=memory_writes,
             prompt_messages=prompt_messages,
             summary=summary,
+        )
+
+    def _row_to_working_memory_item(self, row: sqlite3.Row) -> WorkingMemoryItem:
+        return WorkingMemoryItem(
+            key=row["key"],
+            value=row["value"],
+            tags=json.loads(row["tags_json"] or "[]"),
+            task_tag=row["task_tag"],
+            source_message_ordinal=row["source_message_ordinal"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def _row_to_long_term_memory_item(self, row: sqlite3.Row) -> LongTermMemoryItem:
+        return LongTermMemoryItem(
+            id=row["id"],
+            category=row["category"],
+            key=row["key"],
+            value=row["value"],
+            tags=json.loads(row["tags_json"] or "[]"),
+            source_chat_id=row["source_chat_id"],
+            source_message_ordinal=row["source_message_ordinal"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def _row_to_memory_write(self, row: sqlite3.Row) -> MemoryWriteRecord:
+        return MemoryWriteRecord(
+            id=row["id"],
+            layer=row["layer"],
+            action=row["action"],
+            key=row["key"],
+            value=row["value"],
+            tags=json.loads(row["tags_json"] or "[]"),
+            task_tag=row["task_tag"],
+            reason=row["reason"],
+            source_message_ordinal=row["source_message_ordinal"],
+            created_at=row["created_at"],
         )
 
     def _agent_exists(self, agent_id: str) -> bool:
@@ -664,6 +759,156 @@ class AgentStore:
             for row in rows
         ]
 
+    def list_working_memory(self, agent_id: str, chat_id: str, key: str | None = None, tag: str | None = None, task_tag: str | None = None) -> list[WorkingMemoryItem] | None:
+        if not self._chat_exists(agent_id, chat_id):
+            return None
+        rows = self._connection.execute(
+            "SELECT * FROM working_memory WHERE chat_id = ? ORDER BY key COLLATE NOCASE ASC",
+            (chat_id,),
+        ).fetchall()
+        items = [self._row_to_working_memory_item(row) for row in rows]
+        if key is not None:
+            items = [item for item in items if item.key == key]
+        if tag is not None:
+            items = [item for item in items if tag in item.tags]
+        if task_tag is not None:
+            items = [item for item in items if item.task_tag == task_tag]
+        return items
+
+    def upsert_working_memory(self, agent_id: str, chat_id: str, payload: WorkingMemoryUpsert) -> WorkingMemoryItem | None:
+        if not self._chat_exists(agent_id, chat_id):
+            return None
+        now = self._now()
+        self._connection.execute(
+            """
+            INSERT INTO working_memory (chat_id, key, value, tags_json, task_tag, source_message_ordinal, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(chat_id, key) DO UPDATE SET
+                value = excluded.value,
+                tags_json = excluded.tags_json,
+                task_tag = excluded.task_tag,
+                source_message_ordinal = excluded.source_message_ordinal,
+                updated_at = excluded.updated_at
+            """,
+            (chat_id, payload.key, payload.value, json.dumps(payload.tags, ensure_ascii=True), payload.task_tag, payload.source_message_ordinal, now, now),
+        )
+        self._connection.commit()
+        self.record_memory_write(agent_id, chat_id, "working", "upsert", payload.key, payload.value, payload.tags, payload.task_tag, payload.reason, payload.source_message_ordinal)
+        row = self._connection.execute("SELECT * FROM working_memory WHERE chat_id = ? AND key = ?", (chat_id, payload.key)).fetchone()
+        return self._row_to_working_memory_item(row) if row is not None else None
+
+    def delete_working_memory(self, agent_id: str, chat_id: str, key: str, reason: str = "Explicit delete") -> bool:
+        if not self._chat_exists(agent_id, chat_id):
+            return False
+        row = self._connection.execute("SELECT * FROM working_memory WHERE chat_id = ? AND key = ?", (chat_id, key)).fetchone()
+        cursor = self._connection.execute("DELETE FROM working_memory WHERE chat_id = ? AND key = ?", (chat_id, key))
+        self._connection.commit()
+        if cursor.rowcount <= 0:
+            return False
+        tags = json.loads(row["tags_json"] or "[]") if row is not None else []
+        task_tag = row["task_tag"] if row is not None else None
+        source_message_ordinal = row["source_message_ordinal"] if row is not None else None
+        self.record_memory_write(agent_id, chat_id, "working", "delete", key, None, tags, task_tag, reason, source_message_ordinal)
+        return True
+
+    def list_long_term_memory(self, agent_id: str, query: str | None = None, category: str | None = None, tag: str | None = None) -> list[LongTermMemoryItem] | None:
+        if not self._agent_exists(agent_id):
+            return None
+        rows = self._connection.execute(
+            "SELECT * FROM long_term_memory WHERE agent_id = ? ORDER BY category ASC, key COLLATE NOCASE ASC",
+            (agent_id,),
+        ).fetchall()
+        items = [self._row_to_long_term_memory_item(row) for row in rows]
+        if category is not None:
+            items = [item for item in items if item.category == category]
+        if tag is not None:
+            items = [item for item in items if tag in item.tags]
+        if query is not None:
+            needle = query.casefold()
+            items = [item for item in items if needle in item.key.casefold() or needle in item.value.casefold()]
+        return items
+
+    def upsert_long_term_memory(self, agent_id: str, payload: LongTermMemoryUpsert) -> LongTermMemoryItem | None:
+        if not self._agent_exists(agent_id):
+            return None
+        now = self._now()
+        existing = self._connection.execute(
+            "SELECT id, created_at FROM long_term_memory WHERE agent_id = ? AND category = ? AND key = ?",
+            (agent_id, payload.category, payload.key),
+        ).fetchone()
+        item_id = existing["id"] if existing is not None else str(uuid4())
+        created_at = existing["created_at"] if existing is not None else now
+        self._connection.execute(
+            """
+            INSERT INTO long_term_memory (
+                id, agent_id, category, key, value, tags_json, source_chat_id, source_message_ordinal, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(agent_id, category, key) DO UPDATE SET
+                id = excluded.id,
+                value = excluded.value,
+                tags_json = excluded.tags_json,
+                source_chat_id = excluded.source_chat_id,
+                source_message_ordinal = excluded.source_message_ordinal,
+                updated_at = excluded.updated_at
+            """,
+            (item_id, agent_id, payload.category, payload.key, payload.value, json.dumps(payload.tags, ensure_ascii=True), payload.source_chat_id, payload.source_message_ordinal, created_at, now),
+        )
+        self._connection.commit()
+        self.record_memory_write(agent_id, payload.source_chat_id, "long_term", "upsert", payload.key, payload.value, payload.tags, None, payload.reason, payload.source_message_ordinal)
+        row = self._connection.execute(
+            "SELECT * FROM long_term_memory WHERE agent_id = ? AND category = ? AND key = ?",
+            (agent_id, payload.category, payload.key),
+        ).fetchone()
+        return self._row_to_long_term_memory_item(row) if row is not None else None
+
+    def delete_long_term_memory(self, agent_id: str, item_id: str, reason: str = "Explicit delete") -> bool:
+        if not self._agent_exists(agent_id):
+            return False
+        row = self._connection.execute("SELECT * FROM long_term_memory WHERE id = ? AND agent_id = ?", (item_id, agent_id)).fetchone()
+        if row is None:
+            return False
+        cursor = self._connection.execute("DELETE FROM long_term_memory WHERE id = ? AND agent_id = ?", (item_id, agent_id))
+        self._connection.commit()
+        if cursor.rowcount <= 0:
+            return False
+        self.record_memory_write(agent_id, row["source_chat_id"], "long_term", "delete", row["key"], None, json.loads(row["tags_json"] or "[]"), None, reason, row["source_message_ordinal"])
+        return True
+
+    def record_memory_write(self, agent_id: str, chat_id: str | None, layer: str, action: str, key: str, value: str | None, tags: list[str], task_tag: str | None, reason: str, source_message_ordinal: int | None) -> MemoryWriteRecord:
+        record = MemoryWriteRecord(
+            id=str(uuid4()),
+            layer=layer,
+            action=action,
+            key=key,
+            value=value,
+            tags=tags,
+            task_tag=task_tag,
+            reason=reason,
+            source_message_ordinal=source_message_ordinal,
+            created_at=self._now(),
+        )
+        self._connection.execute(
+            """
+            INSERT INTO memory_writes (
+                id, agent_id, chat_id, layer, action, key, value, tags_json, task_tag, reason, source_message_ordinal, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (record.id, agent_id, chat_id, record.layer, record.action, record.key, record.value, json.dumps(record.tags, ensure_ascii=True), record.task_tag, record.reason, record.source_message_ordinal, record.created_at),
+        )
+        self._connection.commit()
+        return record
+
+    def list_memory_writes(self, agent_id: str, chat_id: str | None = None) -> list[MemoryWriteRecord] | None:
+        if not self._agent_exists(agent_id):
+            return None
+        if chat_id is None:
+            rows = self._connection.execute("SELECT * FROM memory_writes WHERE agent_id = ? ORDER BY created_at ASC", (agent_id,)).fetchall()
+        else:
+            if not self._chat_exists(agent_id, chat_id):
+                return None
+            rows = self._connection.execute("SELECT * FROM memory_writes WHERE agent_id = ? AND chat_id = ? ORDER BY created_at ASC", (agent_id, chat_id)).fetchall()
+        return [self._row_to_memory_write(row) for row in rows]
+
     def create_run_trace(
         self,
         agent_id: str,
@@ -673,6 +918,10 @@ class AgentStore:
         context_window: int | None,
         prompt_summary: str,
         prompt_facts: list[ChatFact],
+        short_term_memory: list[StoredChatMessage],
+        working_memory: list[WorkingMemoryItem],
+        long_term_memory: list[LongTermMemoryItem],
+        memory_writes: list[MemoryWriteRecord],
         prompt_messages: list[StoredChatMessage],
         summary: SummaryTrace | None,
     ) -> str | None:
@@ -683,8 +932,9 @@ class AgentStore:
             """
             INSERT INTO agent_run_traces (
                 id, chat_id, created_at, user_message_ordinal, assistant_message_ordinal,
-                context_mode, context_window, prompt_summary, prompt_facts_json, prompt_messages_json, summary_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                context_mode, context_window, prompt_summary, prompt_facts_json, short_term_memory_json,
+                working_memory_json, long_term_memory_json, memory_writes_json, prompt_messages_json, summary_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 trace_id,
@@ -696,6 +946,10 @@ class AgentStore:
                 context_window,
                 prompt_summary,
                 json.dumps([fact.model_dump() for fact in prompt_facts], ensure_ascii=True),
+                json.dumps([self._trace_message_dict(message) for message in short_term_memory], ensure_ascii=True),
+                json.dumps([item.model_dump() for item in working_memory], ensure_ascii=True),
+                json.dumps([item.model_dump() for item in long_term_memory], ensure_ascii=True),
+                json.dumps([item.model_dump() for item in memory_writes], ensure_ascii=True),
                 json.dumps([self._trace_message_dict(message) for message in prompt_messages], ensure_ascii=True),
                 json.dumps(summary.model_dump(), ensure_ascii=True) if summary else None,
             ),

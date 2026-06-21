@@ -32,10 +32,12 @@ export default function App() {
           <ActivityBar
             isAgentsPanelVisible={workspace.isAgentsPanelVisible}
             isTraceVisible={workspace.isTraceVisible}
+            isMemoryPanelVisible={workspace.isMemoryPanelVisible}
             isBranchesVisible={workspace.isBranchesVisible}
             isBranchingMode={workspace.isBranchingMode}
             onToggleAgents={() => workspace.setIsAgentsPanelVisible((current) => !current)}
             onToggleTrace={() => workspace.setIsTraceVisible((current) => !current)}
+            onToggleMemory={() => workspace.setIsMemoryPanelVisible((current) => !current)}
             onToggleBranches={() => workspace.setIsBranchesVisible((current) => !current)}
           />
 
@@ -62,10 +64,14 @@ export default function App() {
             chats={workspace.chats}
             checkpoints={workspace.checkpoints}
             messages={workspace.messages}
+            workingMemory={workspace.workingMemory}
+            longTermMemory={workspace.longTermMemory}
             isLoading={workspace.isLoading}
             isBranchingMode={workspace.isBranchingMode}
             isBranchesVisible={workspace.isBranchesVisible}
+            isMemoryPanelVisible={workspace.isMemoryPanelVisible}
             selectedChatId={workspace.selectedChatId}
+            memoryTab={workspace.memoryTab}
             task={workspace.task}
             error={workspace.error}
             onSelectChat={workspace.handleSelectChat}
@@ -73,7 +79,12 @@ export default function App() {
             onDeleteChat={workspace.handleDeleteChat}
             onCreateCheckpoint={workspace.handleCreateCheckpoint}
             onCreateBranch={workspace.handleCreateBranch}
+            onMemoryTabChange={workspace.setMemoryTab}
             onTaskChange={workspace.setTask}
+            onCreateWorkingMemory={workspace.handleCreateWorkingMemory}
+            onDeleteWorkingMemory={workspace.handleDeleteWorkingMemory}
+            onCreateLongTermMemory={workspace.handleCreateLongTermMemory}
+            onDeleteLongTermMemory={workspace.handleDeleteLongTermMemory}
             onRunAgent={() => runAgent(workspace.task)}
             onStop={stop}
           />

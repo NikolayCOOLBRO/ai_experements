@@ -408,8 +408,103 @@ button:disabled {
 .editor-body {
   display: grid;
   grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
-  flex: 1;
   min-height: 0;
+  flex: 1;
+}
+
+.editor-body:has(.memory-panel) {
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr) minmax(280px, 340px);
+}
+
+.chat-sidebar,
+.chat-main,
+.memory-panel {
+  min-height: 0;
+}
+
+.memory-panel {
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid #2d2d30;
+  background: #232324;
+}
+
+.memory-tabs {
+  display: flex;
+  gap: 8px;
+  padding: 12px;
+  border-bottom: 1px solid #2d2d30;
+}
+
+.memory-tab {
+  min-height: 30px;
+  padding: 6px 10px;
+  border: 1px solid #3c3c3c;
+  background: #1e1e1e;
+  color: #cccccc;
+}
+
+.memory-tab.active {
+  border-color: #007acc;
+  background: #1f2933;
+}
+
+.memory-content {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+}
+
+.memory-form,
+.memory-list {
+  display: grid;
+  gap: 10px;
+}
+
+.memory-card {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  background: #252526;
+}
+
+.memory-card p,
+.memory-card-head {
+  margin: 0;
+}
+
+.memory-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+@media (max-width: 1280px) {
+  .editor-body,
+  .editor-body:has(.memory-panel) {
+    grid-template-columns: minmax(220px, 260px) minmax(0, 1fr);
+  }
+
+  .memory-panel {
+    grid-column: 1 / -1;
+    border-left: 0;
+    border-top: 1px solid #2d2d30;
+  }
+}
+
+@media (max-width: 900px) {
+  .editor-body,
+  .editor-body:has(.memory-panel) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .chat-sidebar {
+    border-right: 0;
+    border-bottom: 1px solid #2d2d30;
+  }
 }
 
 .chat-sidebar {

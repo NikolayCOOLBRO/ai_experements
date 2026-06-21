@@ -13,7 +13,7 @@ export function TraceInspector({ selectedAgentId, selectedChatId, traces }: Trac
       <div className="inspector-title">
         <div>
           <h3>Inspector</h3>
-          <p>Какие сообщения, summary и facts попали в контекст.</p>
+          <p>Какие данные читались из краткосрочной, рабочей и долговременной памяти.</p>
         </div>
       </div>
 
@@ -94,6 +94,70 @@ export function TraceInspector({ selectedAgentId, selectedChatId, traces }: Trac
                     </article>
                   ))}
                 </div>
+              </section>
+
+              <section className="trace-section">
+                <h4>Краткосрочная память</h4>
+                {trace.short_term_memory.length === 0 ? (
+                  <p>Пусто.</p>
+                ) : (
+                  <div className="trace-messages">
+                    {trace.short_term_memory.map((message) => (
+                      <article className="trace-message" key={`short-${trace.id}-${message.ordinal}`}>
+                        <span>#{message.ordinal} · {message.role === 'user' ? 'user' : 'assistant'}</span>
+                        <p>{message.content}</p>
+                      </article>
+                    ))}
+                  </div>
+                )}
+              </section>
+
+              <section className="trace-section">
+                <h4>Рабочая память</h4>
+                {trace.working_memory.length === 0 ? (
+                  <p>Пусто.</p>
+                ) : (
+                  <div className="trace-messages">
+                    {trace.working_memory.map((item) => (
+                      <article className="trace-message" key={`working-${trace.id}-${item.key}`}>
+                        <span>{item.key}{item.task_tag ? ` · ${item.task_tag}` : ''}</span>
+                        <p>{item.value}</p>
+                      </article>
+                    ))}
+                  </div>
+                )}
+              </section>
+
+              <section className="trace-section">
+                <h4>Долговременная память</h4>
+                {trace.long_term_memory.length === 0 ? (
+                  <p>Пусто.</p>
+                ) : (
+                  <div className="trace-messages">
+                    {trace.long_term_memory.map((item) => (
+                      <article className="trace-message" key={`long-${trace.id}-${item.id}`}>
+                        <span>{item.category}.{item.key}</span>
+                        <p>{item.value}</p>
+                      </article>
+                    ))}
+                  </div>
+                )}
+              </section>
+
+              <section className="trace-section">
+                <h4>Явные записи памяти</h4>
+                {trace.memory_writes.length === 0 ? (
+                  <p>Явных записей не было.</p>
+                ) : (
+                  <div className="trace-messages">
+                    {trace.memory_writes.map((item) => (
+                      <article className="trace-message" key={`write-${item.id}`}>
+                        <span>{item.layer} · {item.action} · {item.key}</span>
+                        <p>{item.reason}</p>
+                      </article>
+                    ))}
+                  </div>
+                )}
               </section>
             </details>
           ))

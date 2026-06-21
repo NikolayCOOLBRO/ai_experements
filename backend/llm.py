@@ -7,7 +7,7 @@ from typing import Literal
 from fastapi import HTTPException
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 
-from schemas import Agent, ChatFact, ChatMessage, StoredChatMessage
+from schemas import Agent, ChatFact, ChatMessage, LongTermMemoryItem, StoredChatMessage, WorkingMemoryItem
 
 
 StreamChunk = tuple[Literal["delta", "done", "error"], dict[str, object]]
@@ -77,7 +77,23 @@ def format_facts(facts: list[ChatFact]) -> str:
     return "\n".join(f"- {fact.category}.{fact.key}: {fact.value}" for fact in facts)
 
 
-def build_agent_input(agent: Agent, memory: list[ChatMessage], summary: str = "", facts: list[ChatFact] | None = None) -> str:
+def format_working_memory(items: list[WorkingMemoryItem]) -> str:
+    return "\n".join(
+        f"- {item.key}: {item.value}"
+        + (f" [task={item.task_tag}]" if item.task_tag else "")
+        + (f" [tags={', '.join(item.tags)}]" if item.tags else "")
+        for item in items
+    )
+
+
+def format_long_term_memory(items: list[LongTermMemoryItem]) -> str:
+    return "\n".join(
+        f"- {item.category}.{item.key}: {item.value}" + (f" [tags={', '.join(item.tags)}]" if item.tags else "")
+        for item in items
+    )
+
+
+def build_agent_input(agent: Agent, memory: list[ChatMessage], summary: str = "", facts: list[ChatFact] | None = None, working_memory: list[WorkingMemoryItem] | None = None, long_term_memory: list[LongTermMemoryItem] | None = None) -> str:
     summary_block = ""
     if summary.strip():
         summary_block = f"""
@@ -89,6 +105,18 @@ def build_agent_input(agent: Agent, memory: list[ChatMessage], summary: str = ""
         facts_block = f"""
 Sticky facts / Key-Value Memory:
 {format_facts(facts)}
+"""
+    working_memory_block = ""
+    if working_memory:
+        working_memory_block = f"""
+Рабочая память активной задачи:
+{format_working_memory(working_memory)}
+"""
+    long_term_memory_block = ""
+    if long_term_memory:
+        long_term_memory_block = f"""
+Долговременная память:
+{format_long_term_memory(long_term_memory)}
 """
     history = format_history(memory)
     return f"""Ты агент: {agent.name}
@@ -102,6 +130,10 @@ Sticky facts / Key-Value Memory:
 Инструкции:
 - Используй контекст агента как назначение и границы ответственности.
 - Используй планирование как внутренний порядок работы.
+- Краткосрочная память - это только текущий диалог.
+- Рабочая память - это временные данные активной задачи.
+- Долговременная память - это устойчивые факты между сессиями.
+- Не считай данные сохраненными, пока они явно не записаны в нужный слой памяти.
 - Используй Sticky facts как устойчивую память чата, если они переданы.
 - Если Sticky facts повлияли на ответ, кратко укажи использованные факты в конце ответа.
 - Не показывай внутренние шаги, если пользователь явно не просит.
@@ -109,6 +141,8 @@ Sticky facts / Key-Value Memory:
 
 {summary_block}
 {facts_block}
+{working_memory_block}
+{long_term_memory_block}
 
 Диалог:
 {history}"""
@@ -138,11 +172,11 @@ def usage_from_response(response: object) -> dict[str, object] | None:
     }
 
 
-def build_request_body(agent: Agent, memory: list[ChatMessage], summary: str = "", facts: list[ChatFact] | None = None) -> dict[str, object]:
+def build_request_body(agent: Agent, memory: list[ChatMessage], summary: str = "", facts: list[ChatFact] | None = None, working_memory: list[WorkingMemoryItem] | None = None, long_term_memory: list[LongTermMemoryItem] | None = None) -> dict[str, object]:
     parameters = agent.parameters
     request_body: dict[str, object] = {
         "model": resolve_model(parameters.model),
-        "input": build_agent_input(agent, memory, summary, facts),
+        "input": build_agent_input(agent, memory, summary, facts, working_memory, long_term_memory),
     }
 
     if parameters.max_output_tokens is not None:
@@ -155,9 +189,9 @@ def build_request_body(agent: Agent, memory: list[ChatMessage], summary: str = "
     return request_body
 
 
-def stream_agent_response(agent: Agent, memory: list[ChatMessage], summary: str = "", facts: list[ChatFact] | None = None) -> Generator[StreamChunk, None, None]:
+def stream_agent_response(agent: Agent, memory: list[ChatMessage], summary: str = "", facts: list[ChatFact] | None = None, working_memory: list[WorkingMemoryItem] | None = None, long_term_memory: list[LongTermMemoryItem] | None = None) -> Generator[StreamChunk, None, None]:
     try:
-        with client.responses.create(**build_request_body(agent, memory, summary, facts), stream=True) as stream:
+        with client.responses.create(**build_request_body(agent, memory, summary, facts, working_memory, long_term_memory), stream=True) as stream:
             for event in stream:
                 if event.type == "response.output_text.delta":
                     yield "delta", {"text": event.delta}

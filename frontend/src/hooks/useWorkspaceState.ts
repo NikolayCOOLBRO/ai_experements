@@ -2,10 +2,13 @@ import { useEffect, useState } from 'react';
 import { fetchAgents, removeAgent, saveAgent } from '../api/agents';
 import { createBranch, createCheckpoint, fetchCheckpoints } from '../api/checkpoints';
 import { createChat, fetchChats, fetchMessages, removeChat } from '../api/chats';
+import { createLongTermMemory, createWorkingMemory, deleteLongTermMemory, deleteWorkingMemory, fetchLongTermMemory, fetchWorkingMemory } from '../api/memory';
 import { fetchModels } from '../api/models';
 import { fetchTraces } from '../api/traces';
-import type { Agent, AgentForm, AgentRunTrace, AiModel, Chat, ChatMessage, Checkpoint } from '../types/agents';
+import type { Agent, AgentForm, AgentRunTrace, AiModel, Chat, ChatMessage, Checkpoint, LongTermMemoryItem, WorkingMemoryItem } from '../types/agents';
 import { emptyForm, formFromAgent, numericValue } from '../utils/agentForm';
+
+type MemoryTab = 'working' | 'long_term';
 
 export function useWorkspaceState() {
   const [models, setModels] = useState<AiModel[]>([]);
@@ -16,12 +19,16 @@ export function useWorkspaceState() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [traces, setTraces] = useState<AgentRunTrace[]>([]);
   const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([]);
+  const [workingMemory, setWorkingMemory] = useState<WorkingMemoryItem[]>([]);
+  const [longTermMemory, setLongTermMemory] = useState<LongTermMemoryItem[]>([]);
   const [form, setForm] = useState<AgentForm>(emptyForm);
   const [task, setTask] = useState('');
   const [isEditing, setIsEditing] = useState(false);
   const [isAgentsPanelVisible, setIsAgentsPanelVisible] = useState(true);
   const [isTraceVisible, setIsTraceVisible] = useState(true);
+  const [isMemoryPanelVisible, setIsMemoryPanelVisible] = useState(true);
   const [isBranchesVisible, setIsBranchesVisible] = useState(false);
+  const [memoryTab, setMemoryTab] = useState<MemoryTab>('working');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -83,8 +90,18 @@ export function useWorkspaceState() {
     setTraces(data.traces);
   }
 
+  async function loadWorkingMemoryForChat(agentId: string, chatId: string) {
+    const items = await fetchWorkingMemory(agentId, chatId);
+    setWorkingMemory(items);
+  }
+
+  async function loadLongTermMemoryForAgent(agentId: string) {
+    const items = await fetchLongTermMemory(agentId);
+    setLongTermMemory(items);
+  }
+
   async function refreshChatData(agentId: string, chatId: string) {
-    await Promise.all([loadMessagesForChat(agentId, chatId), loadTracesForChat(agentId, chatId)]);
+    await Promise.all([loadMessagesForChat(agentId, chatId), loadTracesForChat(agentId, chatId), loadWorkingMemoryForChat(agentId, chatId)]);
   }
 
   async function refreshChats(agentId: string) {
@@ -119,11 +136,13 @@ export function useWorkspaceState() {
     setError(null);
     setMessages([]);
     setTraces([]);
+    setWorkingMemory([]);
+    setLongTermMemory([]);
     setCheckpoints([]);
     setIsBranchesVisible(false);
 
     try {
-      const [nextChats] = await Promise.all([loadChatsForAgent(agent.id), loadCheckpointsForAgent(agent.id)]);
+      const [nextChats] = await Promise.all([loadChatsForAgent(agent.id), loadCheckpointsForAgent(agent.id), loadLongTermMemoryForAgent(agent.id)]);
       if (nextChats.length > 0) {
         setSelectedChatId(nextChats[0].id);
         await refreshChatData(agent.id, nextChats[0].id);
@@ -143,6 +162,8 @@ export function useWorkspaceState() {
     setChats([]);
     setMessages([]);
     setTraces([]);
+    setWorkingMemory([]);
+    setLongTermMemory([]);
     setCheckpoints([]);
     setIsBranchesVisible(false);
     setIsEditing(false);
@@ -202,6 +223,7 @@ export function useWorkspaceState() {
         setSelectedChatId('');
         setMessages([]);
         setTraces([]);
+        setWorkingMemory([]);
       } else {
         setSelectedChatId(nextChats[0].id);
         await refreshChatData(selectedAgentId, nextChats[0].id);
@@ -224,6 +246,7 @@ export function useWorkspaceState() {
       setSelectedChatId(chat.id);
       setMessages([]);
       setTraces([]);
+      setWorkingMemory([]);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось создать чат');
     }
@@ -267,6 +290,79 @@ export function useWorkspaceState() {
     }
   }
 
+  async function handleCreateWorkingMemory(payload: {
+    key: string;
+    value: string;
+    tags: string[];
+    task_tag?: string | null;
+    reason: string;
+    source_message_ordinal?: number | null;
+  }) {
+    if (!selectedAgentId || !selectedChatId) {
+      return;
+    }
+    setError(null);
+    try {
+      await createWorkingMemory(selectedAgentId, selectedChatId, payload);
+      await loadWorkingMemoryForChat(selectedAgentId, selectedChatId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось сохранить рабочую память');
+    }
+  }
+
+  async function handleDeleteWorkingMemory(key: string) {
+    if (!selectedAgentId || !selectedChatId) {
+      return;
+    }
+    if (!window.confirm(`Удалить запись рабочей памяти ${key}?`)) {
+      return;
+    }
+    setError(null);
+    try {
+      await deleteWorkingMemory(selectedAgentId, selectedChatId, key);
+      await loadWorkingMemoryForChat(selectedAgentId, selectedChatId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось удалить рабочую память');
+    }
+  }
+
+  async function handleCreateLongTermMemory(payload: {
+    category: 'goal' | 'constraints' | 'preferences' | 'decisions' | 'agreements' | 'entities';
+    key: string;
+    value: string;
+    tags: string[];
+    reason: string;
+    source_chat_id?: string | null;
+    source_message_ordinal?: number | null;
+  }) {
+    if (!selectedAgentId) {
+      return;
+    }
+    setError(null);
+    try {
+      await createLongTermMemory(selectedAgentId, payload);
+      await loadLongTermMemoryForAgent(selectedAgentId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось сохранить долговременную память');
+    }
+  }
+
+  async function handleDeleteLongTermMemory(itemId: string) {
+    if (!selectedAgentId) {
+      return;
+    }
+    if (!window.confirm('Удалить запись долговременной памяти?')) {
+      return;
+    }
+    setError(null);
+    try {
+      await deleteLongTermMemory(selectedAgentId, itemId);
+      await loadLongTermMemoryForAgent(selectedAgentId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось удалить долговременную память');
+    }
+  }
+
   return {
     models,
     agents,
@@ -274,14 +370,18 @@ export function useWorkspaceState() {
     messages,
     traces,
     checkpoints,
+    workingMemory,
+    longTermMemory,
     form,
     task,
     error,
     isEditing,
     isAgentsPanelVisible,
     isTraceVisible,
+    isMemoryPanelVisible,
     isBranchesVisible,
     isLoading,
+    memoryTab,
     selectedModel,
     selectedAgent,
     selectedChat,
@@ -295,7 +395,9 @@ export function useWorkspaceState() {
     setMessages,
     setIsAgentsPanelVisible,
     setIsTraceVisible,
+    setIsMemoryPanelVisible,
     setIsBranchesVisible,
+    setMemoryTab,
     handleSelectChat,
     handleSelectAgent,
     handleNewAgent,
@@ -305,6 +407,10 @@ export function useWorkspaceState() {
     handleCreateChat,
     handleCreateCheckpoint,
     handleCreateBranch,
+    handleCreateWorkingMemory,
+    handleDeleteWorkingMemory,
+    handleCreateLongTermMemory,
+    handleDeleteLongTermMemory,
     refreshChatData,
     refreshChats,
   };

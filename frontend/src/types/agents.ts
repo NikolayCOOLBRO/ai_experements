@@ -27,6 +27,41 @@ export type ChatFact = {
   source_message_ordinal?: number | null;
 };
 
+export type WorkingMemoryItem = {
+  key: string;
+  value: string;
+  tags: string[];
+  task_tag?: string | null;
+  source_message_ordinal?: number | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type LongTermMemoryItem = {
+  id: string;
+  category: 'goal' | 'constraints' | 'preferences' | 'decisions' | 'agreements' | 'entities';
+  key: string;
+  value: string;
+  tags: string[];
+  source_chat_id?: string | null;
+  source_message_ordinal?: number | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type MemoryWriteRecord = {
+  id: string;
+  layer: 'short_term' | 'working' | 'long_term';
+  action: 'upsert' | 'delete';
+  key: string;
+  value?: string | null;
+  tags: string[];
+  task_tag?: string | null;
+  reason: string;
+  source_message_ordinal?: number | null;
+  created_at: string;
+};
+
 export type AgentRunTrace = {
   id: string;
   created_at: string;
@@ -36,6 +71,10 @@ export type AgentRunTrace = {
   context_window?: number | null;
   prompt_summary: string;
   prompt_facts: ChatFact[];
+  short_term_memory: TraceMessage[];
+  working_memory: WorkingMemoryItem[];
+  long_term_memory: LongTermMemoryItem[];
+  memory_writes: MemoryWriteRecord[];
   prompt_messages: TraceMessage[];
   summary?: SummaryTrace | null;
 };

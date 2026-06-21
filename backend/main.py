@@ -20,11 +20,11 @@ from llm import (
 from schemas import (
     Agent,
     AgentCreate,
-    BranchCreate,
     AgentRunTracesResponse,
     AgentRunRequest,
     AgentsResponse,
     AiModel,
+    BranchCreate,
     Chat,
     ChatCreate,
     ChatMessagesResponse,
@@ -33,10 +33,15 @@ from schemas import (
     Checkpoint,
     CheckpointCreate,
     CheckpointsResponse,
+    LongTermMemoryResponse,
+    LongTermMemoryUpsert,
+    MemoryWritesResponse,
     ModelsResponse,
     SummaryTrace,
     TokenUsage,
     TraceMessage,
+    WorkingMemoryResponse,
+    WorkingMemoryUpsert,
 )
 
 
@@ -149,6 +154,83 @@ def get_chat_messages(agent_id: str, chat_id: str) -> ChatMessagesResponse:
     return ChatMessagesResponse(messages=messages)
 
 
+@app.get("/api/agents/{agent_id}/chats/{chat_id}/memory/short-term", response_model=ChatMessagesResponse)
+def get_short_term_memory(agent_id: str, chat_id: str) -> ChatMessagesResponse:
+    messages = store.get_messages(agent_id, chat_id)
+    if messages is None:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    return ChatMessagesResponse(messages=messages)
+
+
+@app.get("/api/agents/{agent_id}/chats/{chat_id}/memory/working", response_model=WorkingMemoryResponse)
+def get_working_memory(agent_id: str, chat_id: str, key: str | None = None, tag: str | None = None, task_tag: str | None = None) -> WorkingMemoryResponse:
+    items = store.list_working_memory(agent_id, chat_id, key=key, tag=tag, task_tag=task_tag)
+    if items is None:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    return WorkingMemoryResponse(items=items)
+
+
+@app.post("/api/agents/{agent_id}/chats/{chat_id}/memory/working", response_model=WorkingMemoryUpsert, status_code=201)
+def upsert_working_memory(agent_id: str, chat_id: str, payload: WorkingMemoryUpsert) -> WorkingMemoryUpsert:
+    item = store.upsert_working_memory(agent_id, chat_id, payload)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    return WorkingMemoryUpsert(
+        key=item.key,
+        value=item.value,
+        tags=item.tags,
+        task_tag=item.task_tag,
+        reason=payload.reason,
+        source_message_ordinal=item.source_message_ordinal,
+    )
+
+
+@app.delete("/api/agents/{agent_id}/chats/{chat_id}/memory/working/{key}", status_code=204)
+def delete_working_memory(agent_id: str, chat_id: str, key: str) -> Response:
+    if not store.delete_working_memory(agent_id, chat_id, key):
+        raise HTTPException(status_code=404, detail="Working memory item not found")
+    return Response(status_code=204)
+
+
+@app.get("/api/agents/{agent_id}/memory/long-term", response_model=LongTermMemoryResponse)
+def get_long_term_memory(agent_id: str, query: str | None = None, category: str | None = None, tag: str | None = None) -> LongTermMemoryResponse:
+    items = store.list_long_term_memory(agent_id, query=query, category=category, tag=tag)
+    if items is None:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    return LongTermMemoryResponse(items=items)
+
+
+@app.post("/api/agents/{agent_id}/memory/long-term", response_model=LongTermMemoryUpsert, status_code=201)
+def upsert_long_term_memory(agent_id: str, payload: LongTermMemoryUpsert) -> LongTermMemoryUpsert:
+    item = store.upsert_long_term_memory(agent_id, payload)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    return LongTermMemoryUpsert(
+        category=item.category,
+        key=item.key,
+        value=item.value,
+        tags=item.tags,
+        reason=payload.reason,
+        source_chat_id=item.source_chat_id,
+        source_message_ordinal=item.source_message_ordinal,
+    )
+
+
+@app.delete("/api/agents/{agent_id}/memory/long-term/{item_id}", status_code=204)
+def delete_long_term_memory(agent_id: str, item_id: str) -> Response:
+    if not store.delete_long_term_memory(agent_id, item_id):
+        raise HTTPException(status_code=404, detail="Long-term memory item not found")
+    return Response(status_code=204)
+
+
+@app.get("/api/agents/{agent_id}/memory/writes", response_model=MemoryWritesResponse)
+def get_memory_writes(agent_id: str, chat_id: str | None = None) -> MemoryWritesResponse:
+    writes = store.list_memory_writes(agent_id, chat_id)
+    if writes is None:
+        raise HTTPException(status_code=404, detail="Agent or chat not found")
+    return MemoryWritesResponse(writes=writes)
+
+
 @app.get("/api/agents/{agent_id}/chats/{chat_id}/traces", response_model=AgentRunTracesResponse)
 def get_chat_traces(agent_id: str, chat_id: str) -> AgentRunTracesResponse:
     traces = store.list_run_traces(agent_id, chat_id)
@@ -173,10 +255,15 @@ def run_agent_stream(agent_id: str, chat_id: str, payload: AgentRunRequest) -> S
     user_message = ChatMessage(role="user", content=payload.message)
     if not store.append_message(agent_id, chat_id, user_message):
         raise HTTPException(status_code=404, detail="Chat not found")
+    user_message_ordinal = store.get_last_message_ordinal(agent_id, chat_id, "user")
+    store.record_memory_write(agent_id, chat_id, "short_term", "upsert", f"user_message_{user_message_ordinal or 1}", payload.message, [], None, "User message appended to current session history", user_message_ordinal)
 
     def stream_events() -> Generator[str, None, None]:
         assistant_content = ""
         current_memory = store.get_stored_messages(agent_id, chat_id) or []
+        working_memory = store.list_working_memory(agent_id, chat_id) or []
+        long_term_memory = store.list_long_term_memory(agent_id) or []
+        memory_writes = store.list_memory_writes(agent_id, chat_id) or []
         user_message_ordinal = current_memory[-1].ordinal if current_memory else 1
         summary = ""
         summary_state = store.get_chat_summary(agent_id, chat_id)
@@ -233,12 +320,16 @@ def run_agent_stream(agent_id: str, chat_id: str, payload: AgentRunRequest) -> S
             agent.parameters.context_window,
             prompt_summary,
             prompt_facts,
+            current_memory,
+            working_memory,
+            long_term_memory,
+            memory_writes,
             prompt_memory,
             summary_trace,
         )
         final_usage: TokenUsage | None = None
 
-        for event, data in stream_agent_response(agent, prompt_memory, prompt_summary, prompt_facts):
+        for event, data in stream_agent_response(agent, prompt_memory, prompt_summary, prompt_facts, working_memory, long_term_memory):
             if event == "delta":
                 assistant_content += str(data.get("text", ""))
             if event == "done":
@@ -248,7 +339,7 @@ def run_agent_stream(agent_id: str, chat_id: str, payload: AgentRunRequest) -> S
                 estimated = bool(usage.get("estimated", False))
 
                 if not isinstance(input_tokens, int):
-                    input_tokens = estimate_tokens(build_agent_input(agent, prompt_memory, prompt_summary, prompt_facts))
+                    input_tokens = estimate_tokens(build_agent_input(agent, prompt_memory, prompt_summary, prompt_facts, working_memory, long_term_memory))
                     estimated = True
                 if not isinstance(output_tokens, int):
                     output_tokens = estimate_tokens(assistant_content)
@@ -268,6 +359,7 @@ def run_agent_stream(agent_id: str, chat_id: str, payload: AgentRunRequest) -> S
         if assistant_content.strip():
             store.append_message(agent_id, chat_id, ChatMessage(role="assistant", content=assistant_content.strip(), tokens=final_usage))
             assistant_message_ordinal = store.get_last_message_ordinal(agent_id, chat_id, "assistant")
+            store.record_memory_write(agent_id, chat_id, "short_term", "upsert", f"assistant_message_{assistant_message_ordinal or (user_message_ordinal + 1)}", assistant_content.strip(), [], None, "Assistant reply appended to current session history", assistant_message_ordinal)
             if trace_id is not None and assistant_message_ordinal is not None:
                 store.update_run_trace_assistant_ordinal(trace_id, assistant_message_ordinal)
 

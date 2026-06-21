@@ -1,6 +1,7 @@
 import { FormEvent } from 'react';
-import type { Agent, AgentRunTrace, Chat, ChatMessage, Checkpoint } from '../../types/agents';
+import type { Agent, Chat, ChatMessage, Checkpoint, LongTermMemoryItem, WorkingMemoryItem } from '../../types/agents';
 import { tokenSummary } from '../../utils/tokenUsage';
+import { MemoryPanel } from '../memory/MemoryPanel';
 
 type ChatWorkspaceProps = {
   selectedAgent: Agent | null;
@@ -8,10 +9,14 @@ type ChatWorkspaceProps = {
   chats: Chat[];
   checkpoints: Checkpoint[];
   messages: ChatMessage[];
+  workingMemory: WorkingMemoryItem[];
+  longTermMemory: LongTermMemoryItem[];
   isLoading: boolean;
   isBranchingMode: boolean;
   isBranchesVisible: boolean;
+  isMemoryPanelVisible: boolean;
   selectedChatId: string;
+  memoryTab: 'working' | 'long_term';
   task: string;
   error: string | null;
   onSelectChat: (chat: Chat) => void;
@@ -19,7 +24,27 @@ type ChatWorkspaceProps = {
   onDeleteChat: () => void;
   onCreateCheckpoint: () => void;
   onCreateBranch: (checkpoint: Checkpoint) => void;
+  onMemoryTabChange: (tab: 'working' | 'long_term') => void;
   onTaskChange: React.Dispatch<React.SetStateAction<string>>;
+  onCreateWorkingMemory: (payload: {
+    key: string;
+    value: string;
+    tags: string[];
+    task_tag?: string | null;
+    reason: string;
+    source_message_ordinal?: number | null;
+  }) => Promise<void>;
+  onDeleteWorkingMemory: (key: string) => Promise<void>;
+  onCreateLongTermMemory: (payload: {
+    category: 'goal' | 'constraints' | 'preferences' | 'decisions' | 'agreements' | 'entities';
+    key: string;
+    value: string;
+    tags: string[];
+    reason: string;
+    source_chat_id?: string | null;
+    source_message_ordinal?: number | null;
+  }) => Promise<void>;
+  onDeleteLongTermMemory: (itemId: string) => Promise<void>;
   onRunAgent: () => void;
   onStop: () => void;
 };
@@ -30,10 +55,14 @@ export function ChatWorkspace({
   chats,
   checkpoints,
   messages,
+  workingMemory,
+  longTermMemory,
   isLoading,
   isBranchingMode,
   isBranchesVisible,
+  isMemoryPanelVisible,
   selectedChatId,
+  memoryTab,
   task,
   error,
   onSelectChat,
@@ -41,7 +70,12 @@ export function ChatWorkspace({
   onDeleteChat,
   onCreateCheckpoint,
   onCreateBranch,
+  onMemoryTabChange,
   onTaskChange,
+  onCreateWorkingMemory,
+  onDeleteWorkingMemory,
+  onCreateLongTermMemory,
+  onDeleteLongTermMemory,
   onRunAgent,
   onStop,
 }: ChatWorkspaceProps) {
@@ -174,6 +208,21 @@ export function ChatWorkspace({
             </form>
           </div>
         </div>
+
+        {isMemoryPanelVisible && (
+          <MemoryPanel
+            selectedAgent={selectedAgent}
+            selectedChat={selectedChat}
+            workingMemory={workingMemory}
+            longTermMemory={longTermMemory}
+            activeTab={memoryTab}
+            onTabChange={onMemoryTabChange}
+            onCreateWorkingMemory={onCreateWorkingMemory}
+            onDeleteWorkingMemory={onDeleteWorkingMemory}
+            onCreateLongTermMemory={onCreateLongTermMemory}
+            onDeleteLongTermMemory={onDeleteLongTermMemory}
+          />
+        )}
       </div>
     </section>
   );
